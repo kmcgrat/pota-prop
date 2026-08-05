@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# PyInstaller / Build Artifacts
+build/
+dist/
+AppDir/
+*.AppImage
+*.spec.bak
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# User Logs and Exports
+*.log
+hunter_parks*.csv
+exported_spots*.csv
+
+# OS generated
+.DS_Store
+Thumbs.db

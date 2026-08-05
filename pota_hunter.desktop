@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=POTA Hunter
+Comment=Amateur Radio Parks on the Air (POTA) Hunt Tool
+Exec=pota-hunter
+Icon=pota_hunter
+Categories=Network;HamRadio;Utility;
+Terminal=false
