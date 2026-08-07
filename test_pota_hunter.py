@@ -411,6 +411,7 @@ class TestPOTAComparatorGUIHeadless(unittest.TestCase):
         self.assertEqual(window.table.rowCount(), 1)
 
         # Test callsign lookup
+        window.chk_p2p.setChecked(False)
         window.txt_my_call.setText("W1AW")
         window.on_my_call_changed()
         self.assertEqual(window.txt_grid.text().upper(), "FN31PR")
@@ -681,6 +682,7 @@ class TestStationPropagationModeling(unittest.TestCase):
             band="20m",
             mode="FT8",
             solar_weather=SolarWeather(sfi=150.0, k_index=1.0),
+            dt_utc=datetime(2026, 6, 21, 15, 0, 0, tzinfo=timezone.utc),
         )
         self.assertIn(res_eu.ray_mode, ("2F2", "3F2"))
         self.assertGreater(res_eu.hop_count, 1)
@@ -821,6 +823,28 @@ class TestStationPropagationModeling(unittest.TestCase):
         self.assertEqual(act10.level, 10)
         self.assertTrue(act10.is_disconnect_advisory)
         self.assertIn("DANGER", act10.advisory)
+
+        # 5. Frequent Lightning Boost (closest 58 miles is base Level 7; boosted to Level 8 with frequent clusters)
+        summary_freq = RegionalLightningSummary(
+            active_storm_count=6,
+            closest_storm_miles=58.0,
+            closest_storm_bearing=240.0,
+            storm_cells=[
+                StormCell(latitude=38.0, longitude=-82.5, distance_miles=58.0, bearing_deg=240.0),
+                StormCell(latitude=38.2, longitude=-82.8, distance_miles=65.0, bearing_deg=250.0),
+                StormCell(latitude=37.8, longitude=-82.1, distance_miles=75.0, bearing_deg=230.0),
+                StormCell(latitude=38.5, longitude=-83.0, distance_miles=90.0, bearing_deg=270.0),
+                StormCell(latitude=37.5, longitude=-81.5, distance_miles=95.0, bearing_deg=190.0),
+                StormCell(latitude=39.0, longitude=-82.0, distance_miles=130.0, bearing_deg=330.0),
+            ],
+        )
+        act_freq = summary_freq.get_activity_level()
+        self.assertEqual(act_freq.level, 8)
+        self.assertEqual(act_freq.label, "Frequent Lightning")
+        self.assertFalse(act_freq.is_disconnect_advisory)
+        self.assertIn("~58 mi", act_freq.description)
+        self.assertIn("Frequent lightning", act_freq.description)
+        self.assertIn("~58 mi", act_freq.advisory)
 
         # Test tooltip HTML formatting
         html = summary_sev.format_tooltip_html()
@@ -1040,6 +1064,14 @@ class TestStationPropagationModeling(unittest.TestCase):
             self.assertIn("US-0001", window.hunted_parks)
 
         finally:
+            if 'window' in locals():
+                window.refresh_timer.stop()
+                if hasattr(window, "utc_clock_timer") and window.utc_clock_timer.isActive():
+                    window.utc_clock_timer.stop()
+                if hasattr(window, "utc_rollover_timer") and window.utc_rollover_timer.isActive():
+                    window.utc_rollover_timer.stop()
+                window.threadpool.waitForDone(1000)
+                window.close()
             if os.path.exists(temp_csv):
                 os.unlink(temp_csv)
 
@@ -1125,8 +1157,39 @@ class TestStationPropagationModeling(unittest.TestCase):
             bearing_deg=90.0,
             polygon_coords=charleston_poly,
             issued_minutes_ago=10,
+            expires_in_minutes=25,
         )
         self.assertEqual(warning.actual_strikes_in_polygon, 0)
+        self.assertEqual(warning.expires_in_minutes, 25)
+
+    def test_nws_warning_expiration_tooltip_display(self):
+        """Test that lightning tooltip formats expiration time (e.g. 'expires in 25m' / 'expires in 1h 15m') instead of issued age."""
+        from lightning_engine import NWSWarning, RegionalLightningSummary
+
+        w1 = NWSWarning(
+            event_type="Tornado Warning",
+            headline="Tornado Warning Issued",
+            distance_miles=15.0,
+            bearing_deg=180.0,
+            issued_minutes_ago=5,
+            expires_in_minutes=25,
+        )
+        summary1 = RegionalLightningSummary(nws_warnings=[w1])
+        html1 = summary1.format_tooltip_html()
+        self.assertIn("expires in 25m", html1)
+        self.assertNotIn("issued 5m ago", html1)
+
+        w2 = NWSWarning(
+            event_type="Severe Thunderstorm Warning",
+            headline="Severe Thunderstorm Warning",
+            distance_miles=30.0,
+            bearing_deg=45.0,
+            issued_minutes_ago=15,
+            expires_in_minutes=75,
+        )
+        summary2 = RegionalLightningSummary(nws_warnings=[w2])
+        html2 = summary2.format_tooltip_html()
+        self.assertIn("expires in 1h 15m", html2)
 
     def test_hybrid_lightning_summary_generation(self):
         """Test hybrid summary generation, HTML tooltip rendering, and QRN calculation."""
@@ -1167,6 +1230,244 @@ class TestStationPropagationModeling(unittest.TestCase):
         self.assertIn("Station Safety Advisory", html)
         self.assertIn("Scale: 1-3", html)
 
+    def test_smooth_blending_nws_to_blitzortung(self):
+        """Test continuous averaging/cross-fade between NWS warnings and Blitzortung data over warmup window."""
+        import time
+        from lightning_engine import (
+            LightningEngine,
+            NWSWarning,
+            LightningStrike,
+            RegionalLightningSummary,
+        )
+
+        engine = LightningEngine()
+        engine.strike_buffer.clear()
+        # Mock active NWS warning
+        poly = [(-81.9, 38.2), (-81.5, 38.2), (-81.5, 38.5), (-81.9, 38.5)]
+        engine.cached_nws_warnings = [
+            NWSWarning(
+                event_type="Severe Thunderstorm Warning",
+                headline="Severe Storm with Lightning",
+                distance_miles=40.0,
+                bearing_deg=220.0,
+                polygon_coords=poly,
+                issued_minutes_ago=10,
+                expires_in_minutes=45,
+            )
+        ]
+        from datetime import datetime, timezone
+        engine.last_nws_fetch_time = datetime.now(timezone.utc)
+
+        # 1. At startup (t = 0s, no live connection yet) -> 100% NWS bootstrap
+        engine.start_time = time.time()
+        engine.stream_thread = None
+        s0 = engine._compute_hybrid_summary(38.3, -81.6)
+        self.assertIn("NOAA NWS", s0.source)
+        self.assertEqual(len(s0.storm_cells), 1)
+        self.assertGreaterEqual(s0.strike_rate_per_min, 10)
+        self.assertGreaterEqual(s0.total_strikes_detected, 150)
+        html0 = s0.format_tooltip_html()
+        self.assertIn("Modeled Activity in Polygon", html0)
+        self.assertIn("Nearest Lightning Activity", html0)
+        self.assertIn("40.0 mi", html0)
+
+        # 2. At t = 15s (startup warmup phase 1) with stream connected
+        class MockStreamThread:
+            is_connected = True
+            def is_alive(self):
+                return True
+            def update_home_location(self, lat, lon, reset_buffer=False):
+                pass
+
+        engine.stream_thread = MockStreamThread()
+        engine.start_time = time.time() - 15.0
+        s15 = engine._compute_hybrid_summary(38.3, -81.6)
+        self.assertIn("Hybrid NWS + Blitzortung", s15.source)
+        self.assertEqual(len(s15.storm_cells), 1)
+        self.assertGreater(s15.strike_rate_per_min, 0)
+        self.assertGreater(s15.total_strikes_detected, 0)
+
+        # 3. At t = 300s (5 min uptime with live stream) -> ~33% Blitzortung, 67% NWS
+        engine.start_time = time.time() - 300.0
+        # Add 3 strikes inside the polygon
+        engine.strike_buffer.add_strike(LightningStrike(timestamp_utc=time.time(), latitude=38.35, longitude=-81.7, distance_miles=35.0, bearing_deg=215.0))
+        engine.strike_buffer.add_strike(LightningStrike(timestamp_utc=time.time(), latitude=38.36, longitude=-81.72, distance_miles=36.0, bearing_deg=216.0))
+        s300 = engine._compute_hybrid_summary(38.3, -81.6)
+        self.assertIn("Hybrid NWS + Blitzortung", s300.source)
+        self.assertGreater(s300.storm_cells[0].actual_strikes_in_polygon, 0)
+        html300 = s300.format_tooltip_html()
+        self.assertIn("Live Activity in Polygon", html300)
+
+        # 4. At t = 1000s (full saturation) -> 100% Blitzortung
+        engine.start_time = time.time() - 1000.0
+        s1000 = engine._compute_hybrid_summary(38.3, -81.6)
+        self.assertIn("Blitzortung", s1000.source)
+        engine.stream_thread = None
+
+    def test_adaptive_startup_lightning_timer(self):
+        """Test that GUI adaptive startup lightning timer runs every 5s for first 30s, 10s for next 30s, then stops."""
+        import time
+        from pota_hunter import POTAHunterApp
+
+        window = POTAHunterApp()
+        self.assertTrue(window.startup_lightning_timer.isActive())
+        self.assertEqual(window.startup_lightning_timer.interval(), 5000)
+
+        # Phase 1: 0 - 30 seconds (interval remains 5000ms)
+        window.startup_lightning_start_time = time.time() - 15.0
+        window._on_startup_lightning_tick()
+        self.assertTrue(window.startup_lightning_timer.isActive())
+        self.assertEqual(window.startup_lightning_timer.interval(), 5000)
+
+        # Phase 2: 30 - 60 seconds (interval updates to 10000ms)
+        window.startup_lightning_start_time = time.time() - 35.0
+        window._on_startup_lightning_tick()
+        self.assertTrue(window.startup_lightning_timer.isActive())
+        self.assertEqual(window.startup_lightning_timer.interval(), 10000)
+
+        # Phase 3: > 60 seconds (timer stops)
+        window.startup_lightning_start_time = time.time() - 65.0
+        window._on_startup_lightning_tick()
+        self.assertFalse(window.startup_lightning_timer.isActive())
+
+        # Cleanup
+        window.startup_lightning_timer.stop()
+        window.refresh_timer.stop()
+        window.utc_rollover_timer.stop()
+        window.utc_clock_timer.stop()
+        window.threadpool.clear()
+        window.threadpool.waitForDone(2000)
+        window.close()
+
+    def test_cluster_motion_and_toa_approaching(self):
+        """Test calculation of speed, heading, approach determination, and TOA for an approaching storm cluster."""
+        import time
+        from lightning_engine import compute_cluster_motion_and_toa, LightningStrike
+
+        # Home location: Charleston, WV area (38.3125, -81.7083)
+        home_lat, home_lon = 38.3125, -81.7083
+
+        # Storm cluster starting 35 miles SW (around 38.0, -82.1) and moving NE towards home at ~30 mph over 10 min
+        now = time.time()
+        strikes = [
+            LightningStrike(timestamp_utc=now - 600.0, latitude=37.95, longitude=-82.15, distance_miles=35.0, bearing_deg=225.0),
+            LightningStrike(timestamp_utc=now - 550.0, latitude=37.96, longitude=-82.14, distance_miles=34.0, bearing_deg=225.0),
+            LightningStrike(timestamp_utc=now - 50.0, latitude=38.05, longitude=-82.02, distance_miles=27.0, bearing_deg=225.0),
+            LightningStrike(timestamp_utc=now, latitude=38.06, longitude=-82.01, distance_miles=26.0, bearing_deg=225.0),
+        ]
+
+        speed, heading, is_approaching, toa_min, toa_lbl = compute_cluster_motion_and_toa(
+            strikes, home_lat, home_lon, current_dist_mi=26.0, current_bearing_deg=225.0
+        )
+
+        self.assertIsNotNone(speed)
+        self.assertGreater(speed, 10.0)
+        self.assertLess(speed, 65.0)
+        self.assertTrue(is_approaching)
+        self.assertIsNotNone(toa_min)
+        self.assertGreater(toa_min, 0)
+        self.assertLess(toa_min, 120)
+        self.assertTrue(toa_lbl.endswith("m") or "h" in toa_lbl)
+        self.assertNotEqual(toa_lbl, "NA")
+
+    def test_cluster_motion_and_toa_receding_or_divergent(self):
+        """Test that clusters moving away or passing perpendicular return is_approaching=False and toa_label='NA'."""
+        import time
+        from lightning_engine import compute_cluster_motion_and_toa, LightningStrike
+
+        home_lat, home_lon = 38.3125, -81.7083
+        now = time.time()
+
+        # Receding cluster moving further east away from QTH
+        receding_strikes = [
+            LightningStrike(timestamp_utc=now - 600.0, latitude=38.31, longitude=-81.30, distance_miles=22.0, bearing_deg=90.0),
+            LightningStrike(timestamp_utc=now - 500.0, latitude=38.31, longitude=-81.28, distance_miles=23.0, bearing_deg=90.0),
+            LightningStrike(timestamp_utc=now - 50.0, latitude=38.31, longitude=-81.10, distance_miles=33.0, bearing_deg=90.0),
+            LightningStrike(timestamp_utc=now, latitude=38.31, longitude=-81.08, distance_miles=34.0, bearing_deg=90.0),
+        ]
+        speed, heading, is_appr, toa_min, toa_lbl = compute_cluster_motion_and_toa(
+            receding_strikes, home_lat, home_lon, current_dist_mi=34.0, current_bearing_deg=90.0
+        )
+        self.assertFalse(is_appr)
+        self.assertEqual(toa_lbl, "NA")
+        self.assertIsNone(toa_min)
+
+        # Insufficient strike history (< 60s span)
+        brief_strikes = [
+            LightningStrike(timestamp_utc=now - 10.0, latitude=38.0, longitude=-82.0, distance_miles=30.0, bearing_deg=220.0),
+            LightningStrike(timestamp_utc=now - 5.0, latitude=38.01, longitude=-81.99, distance_miles=29.0, bearing_deg=220.0),
+            LightningStrike(timestamp_utc=now, latitude=38.02, longitude=-81.98, distance_miles=28.0, bearing_deg=220.0),
+        ]
+        s2, h2, is_appr2, toa_min2, toa_lbl2 = compute_cluster_motion_and_toa(
+            brief_strikes, home_lat, home_lon, current_dist_mi=28.0, current_bearing_deg=220.0
+        )
+        self.assertFalse(is_appr2)
+        self.assertEqual(toa_lbl2, "NA")
+
+    def test_cluster_motion_tooltip_table_rendering(self):
+        """Test that format_tooltip_html correctly includes Motion / TOA column header and approaching/NA badges."""
+        from lightning_engine import RegionalLightningSummary, StormCell
+
+        summary = RegionalLightningSummary(
+            storm_cells=[
+                StormCell(
+                    latitude=38.0, longitude=-82.0,
+                    distance_miles=25.0, bearing_deg=220.0,
+                    estimated_strikes_per_min=12,
+                    total_strikes_in_cluster=180,
+                    movement_speed_mph=28.4,
+                    movement_heading_deg=40.0,
+                    is_approaching=True,
+                    estimated_toa_minutes=35,
+                    toa_label="35m",
+                ),
+                StormCell(
+                    latitude=39.5, longitude=-80.0,
+                    distance_miles=110.0, bearing_deg=45.0,
+                    estimated_strikes_per_min=2,
+                    total_strikes_in_cluster=30,
+                    movement_speed_mph=15.0,
+                    movement_heading_deg=180.0,
+                    is_approaching=False,
+                    toa_label="NA",
+                ),
+            ]
+        )
+        html = summary.format_tooltip_html()
+        self.assertIn(">Motion / TOA</th>", html)
+        self.assertIn("28 mph → NE (TOA 35m)", html)
+        self.assertIn("15 mph → S (TOA: NA)", html)
+
+    def test_itur_p372_diurnal_atmospheric_noise(self):
+        """Test ITU-R P.372 frequency-dependent day/night atmospheric noise curve."""
+        from datetime import datetime, timezone
+        from propagation_engine import calculate_qso_probability, SolarWeather
+
+        solar = SolarWeather(sfi=150, k_index=2, a_index=7, xray_class="B1.0")
+
+        # 160m (1.840 MHz): Compare daytime vs nighttime noise figures
+        dt_day = datetime(2026, 6, 21, 18, 0, 0, tzinfo=timezone.utc)   # Midday solar noon
+        dt_night = datetime(2026, 6, 21, 5, 0, 0, tzinfo=timezone.utc)  # Nighttime 05:00 UTC
+
+        res_day = calculate_qso_probability(
+            home_lat=38.3, home_lon=-81.6,
+            target_lat=41.7, target_lon=-72.7, target_grid="FN31",
+            freq_khz=1840.0, band="160m", mode="SSB",
+            solar_weather=solar, dt_utc=dt_day,
+        )
+        res_night = calculate_qso_probability(
+            home_lat=38.3, home_lon=-81.6,
+            target_lat=41.7, target_lon=-72.7, target_grid="FN31",
+            freq_khz=1840.0, band="160m", mode="SSB",
+            solar_weather=solar, dt_utc=dt_night,
+        )
+
+        self.assertIsNotNone(res_day.noise_floor_dbw)
+        self.assertIsNotNone(res_night.noise_floor_dbw)
+        # Night noise power on 160m (in dBW) is higher than day due to lack of D-layer absorption & distant global sferics
+        self.assertGreater(res_night.noise_floor_dbw, res_day.noise_floor_dbw)
+        self.assertGreaterEqual(res_night.noise_floor_dbw - res_day.noise_floor_dbw, 10.0)
+
     def test_location_change_resets_lightning_engine(self):
         """Test that changing operator location or callsign resets the strike buffer, cache, and starts fresh bootstrap."""
         import time
@@ -1192,6 +1493,8 @@ class TestStationPropagationModeling(unittest.TestCase):
         self.assertGreaterEqual(len(engine.strike_buffer.get_all_strikes()), 1)
 
         # Now reset location to Florida (EL98: ~28.5, -81.4)
+        if engine.stream_thread and hasattr(engine.stream_thread, "stop"):
+            engine.stream_thread.stop()
         summary = reset_lightning_engine_location(28.5, -81.4)
         self.assertAlmostEqual(engine.current_home_lat, 28.5)
         self.assertAlmostEqual(engine.current_home_lon, -81.4)
@@ -1203,6 +1506,7 @@ class TestStationPropagationModeling(unittest.TestCase):
         from propagation_engine import CallsignLocation
 
         window = POTAHunterApp()
+        window.chk_p2p.setChecked(False)
         self.assertIsNotNone(window.lightning_summary)
 
         # Simulate callsign lookup finishing for W4ABC in Florida (EL98ja)
@@ -1218,8 +1522,410 @@ class TestStationPropagationModeling(unittest.TestCase):
         window.on_grid_changed()
         self.assertEqual(window.current_grid, "CN87UK")
         self.assertIsNotNone(window.lightning_summary)
+
+        window.startup_lightning_timer.stop()
         window.refresh_timer.stop()
+        window.utc_rollover_timer.stop()
+        window.utc_clock_timer.stop()
+        window.threadpool.clear()
+        window.threadpool.waitForDone(2000)
+        window.close()
+
+    def test_compute_band_noise_matrix_all_bands(self):
+        """Test compute_band_noise_matrix returns all 11 amateur bands with valid Fa and S-meter metrics."""
+        from datetime import datetime, timezone
+        from propagation_engine import compute_band_noise_matrix, SolarWeather
+
+        dt_utc = datetime(2026, 6, 21, 18, 0, 0, tzinfo=timezone.utc)
+        solar = SolarWeather(sfi=150, k_index=2, a_index=7, xray_class="B1.0")
+
+        matrix = compute_band_noise_matrix(
+            home_lat=38.3,
+            home_lon=-81.6,
+            solar_weather=solar,
+            lightning_summary=None,
+            dt_utc=dt_utc,
+        )
+
+        self.assertEqual(len(matrix), 11)
+        bands = [b.band for b in matrix]
+        self.assertIn("160m", bands)
+        self.assertIn("80m", bands)
+        self.assertIn("40m", bands)
+        self.assertIn("20m", bands)
+        self.assertIn("10m", bands)
+        self.assertIn("6m", bands)
+
+        # 160m atmospheric noise figure should exceed 10m atmospheric noise figure
+        b_160 = next(b for b in matrix if b.band == "160m")
+        b_10 = next(b for b in matrix if b.band == "10m")
+        self.assertGreater(b_160.f_atm_total_db, b_10.f_atm_total_db)
+
+        # S-meter values should be present and valid
+        for b in matrix:
+            self.assertIsNotNone(b.s_units_label)
+            self.assertGreater(b.f_a_total_db, 0.0)
+            self.assertLess(b.noise_power_dbm, 0.0)
+
+    def test_band_noise_matrix_lightning_qrn_surge(self):
+        """Test that live regional lightning activity injects QRN surges into band noise breakdown."""
+        from datetime import datetime, timezone
+        from propagation_engine import compute_band_noise_matrix
+        from lightning_engine import RegionalLightningSummary, StormCell
+
+        cell = StormCell(
+            latitude=38.4,
+            longitude=-81.5,
+            intensity_weight=1.5,
+            distance_miles=12.0,
+            bearing_deg=45.0,
+            estimated_strikes_per_min=10,
+        )
+        summary = RegionalLightningSummary(
+            active_storm_count=1,
+            total_strikes_detected=600,
+            strike_rate_per_min=10,
+            closest_storm_miles=12.0,
+            closest_storm_bearing=45.0,
+            storm_cells=[cell],
+        )
+
+        matrix = compute_band_noise_matrix(
+            home_lat=38.3,
+            home_lon=-81.6,
+            lightning_summary=summary,
+        )
+
+        b_160 = next(b for b in matrix if b.band == "160m")
+        b_40 = next(b for b in matrix if b.band == "40m")
+
+        # 160m and 40m should experience significant QRN surges
+        self.assertGreaterEqual(b_160.qrn_surge_db, 10.0)
+        self.assertGreaterEqual(b_40.qrn_surge_db, 3.0)
+        self.assertTrue(b_160.is_elevated_qrn)
+
+    def test_band_noise_dialog_gui_instantiation(self):
+        """Test that BandNoiseDialog instantiates and populates table without UI exceptions."""
+        from pota_hunter import BandNoiseDialog
+        from propagation_engine import SolarWeather
+        from lightning_engine import RegionalLightningSummary, StormCell
+
+        solar = SolarWeather(sfi=140, k_index=2, a_index=5)
+        cell = StormCell(
+            latitude=38.5,
+            longitude=-81.4,
+            distance_miles=45.0,
+            bearing_deg=60.0,
+        )
+        lightning = RegionalLightningSummary(
+            active_storm_count=1,
+            total_strikes_detected=25,
+            closest_storm_miles=45.0,
+            closest_storm_bearing=60.0,
+            storm_cells=[cell],
+        )
+
+        dlg = BandNoiseDialog(
+            home_lat=38.3,
+            home_lon=-81.6,
+            solar_weather=solar,
+            lightning_summary=lightning,
+        )
+
+        self.assertEqual(dlg.table.rowCount(), 11)
+        self.assertEqual(dlg.table.columnCount(), 8)
+        # Check first row has 160m
+        item_band = dlg.table.item(0, 0)
+        self.assertIsNotNone(item_band)
+        self.assertIn("160m", item_band.text())
+        dlg.close()
+
+
+class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def test_worked_parks_tracker(self):
+        from datetime import datetime, timezone
+        from pota_hunter import WorkedParksTracker
+        tracker = WorkedParksTracker()
+        self.assertEqual(len(tracker), 0)
+
+        # Add with default today's date
+        tracker.add("US-1845")
+        self.assertIn("US-1845", tracker)
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.assertEqual(tracker["US-1845"], today_str)
+
+        # Add with explicit previous date
+        tracker.add("K-0001", "2026-01-01")
+        self.assertEqual(tracker["K-0001"], "2026-01-01")
+
+        # Discard
+        tracker.discard("US-1845")
+        self.assertNotIn("US-1845", tracker)
+        self.assertIn("K-0001", tracker)
+
+    def test_get_worked_status_transitions(self):
+        from propagation_engine import SolarWeather
+        from pota_hunter import POTAHunterApp
+        from data_engine import ActiveSpot
+        from datetime import datetime, timezone
+
+        window = POTAHunterApp()
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Mock single active spot
+        mock_spot = ActiveSpot(
+            spot_id=99999,
+            activator="W8TEST",
+            frequency_raw="14074",
+            frequency_khz=14074.0,
+            band="20m",
+            mode="FT8",
+            reference="US-9999",
+            park_name="Test Rollover Park",
+            spot_time_raw="2026-08-05T23:45:00",
+            spot_time_dt=None,
+            spotter="TESTER",
+            comments="POTA test",
+            source="POTA",
+            location_desc="US-WV",
+            grid4="EM98",
+            grid6="EM98dh",
+            latitude=38.3,
+            longitude=-81.7,
+            count=1,
+            expire=3000,
+        )
+        window.on_spots_fetched([mock_spot], SolarWeather(sfi=140.0, k_index=1.0))
+
+        # 1. Unworked state
+        window.manually_worked_parks.discard("US-9999")
+        self.assertIsNone(window.get_worked_status("US-9999"))
+
+        # 2. Worked today (before 00Z)
+        window.toggle_park_worked("US-9999", force_state=True)
+        self.assertEqual(window.get_worked_status("US-9999"), "TODAY")
+        window.recompute_comparisons()
+        window.populate_table(window.compared_spots)
+        
+        # Verify [WORKED] in cell widget or text
+        item_status = window.table.item(0, 0)
+        self.assertEqual(item_status.text(), "[WORKED]")
+
+        # 3. Simulate 00Z Day Rollover (worked yesterday)
+        window.manually_worked_parks["US-9999"] = "2020-01-01"
+        self.assertEqual(window.get_worked_status("US-9999"), "PREVIOUS_DAY")
+        window.recompute_comparisons()
+        window.populate_table(window.compared_spots)
+
+        # Verify Hunted(W) badge display
+        item_status = window.table.item(0, 0)
+        self.assertIn("Hunted(W)", item_status.text())
+
+        # Reset filter controls to All
+        window.combo_dx.setCurrentIndex(0)
+        window.combo_band.setCurrentIndex(0)
+        window.combo_mode.setCurrentIndex(0)
+        window.txt_search.setText("")
+
+        # Test filters with Hunted(W)
+        # Status Filter 1 (New Only) -> Should not show US-9999
+        window.combo_status.setCurrentIndex(1)
+        window.apply_filters()
+        self.assertEqual(window.table.rowCount(), 0)
+
+        # Status Filter 2 (Hunted) -> Should show US-9999
+        window.combo_status.setCurrentIndex(2)
+        window.apply_filters()
+        self.assertEqual(window.table.rowCount(), 1)
+
+        # Status Filter 3 ([WORKED] Today Only) -> Should NOT show US-9999 (eligible to hunt again)
+        window.combo_status.setCurrentIndex(3)
+        window.apply_filters()
+        self.assertEqual(window.table.rowCount(), 0)
+
+        # 4. Work the park on the new day -> Transitions back to [WORKED]
+        window.toggle_park_worked("US-9999", force_state=True)
+        self.assertEqual(window.get_worked_status("US-9999"), "TODAY")
+        self.assertEqual(window.manually_worked_parks["US-9999"], today_utc)
+        window.apply_filters()
+        self.assertEqual(window.table.rowCount(), 1)
+
+        # Cleanup
+        window.refresh_timer.stop()
+        window.utc_rollover_timer.stop()
+        window.utc_clock_timer.stop()
         window.threadpool.waitForDone(1000)
+        window.close()
+
+    def test_utc_clock_display(self):
+        from pota_hunter import POTAHunterApp
+        from datetime import datetime, timezone
+        window = POTAHunterApp()
+        
+        expected_prefix = "Time: "
+        expected_suffix = " UTC"
+        current_time_utc = datetime.now(timezone.utc).strftime("%H:%M")
+
+        self.assertTrue(window.lbl_utc_clock_top.text().startswith(expected_prefix))
+        self.assertTrue(window.lbl_utc_clock_top.text().endswith(expected_suffix))
+        self.assertIn(current_time_utc, window.lbl_utc_clock_top.text())
+
+        self.assertTrue(window.lbl_utc_clock_bottom.text().startswith(expected_prefix))
+        self.assertTrue(window.lbl_utc_clock_bottom.text().endswith(expected_suffix))
+        self.assertIn(current_time_utc, window.lbl_utc_clock_bottom.text())
+
+        # Cleanup
+        window.refresh_timer.stop()
+        window.utc_rollover_timer.stop()
+        window.utc_clock_timer.stop()
+        window.threadpool.waitForDone(1000)
+        window.close()
+
+    def test_wmo_weather_code_mapping(self):
+        """Test WMO weather code to description/icon translation and cardinal direction mapping."""
+        from weather_engine import get_wmo_info, degrees_to_cardinal
+
+        desc0, icon0, short0 = get_wmo_info(0)
+        self.assertEqual(desc0, "Clear Sky")
+        self.assertEqual(icon0, "☀️")
+        self.assertEqual(short0, "Clear")
+
+        desc63, icon63, short63 = get_wmo_info(63)
+        self.assertEqual(desc63, "Moderate Rain")
+        self.assertEqual(icon63, "🌧️")
+
+        desc95, icon95, short95 = get_wmo_info(95)
+        self.assertEqual(desc95, "Thunderstorm")
+        self.assertEqual(icon95, "🌩️")
+
+        self.assertEqual(degrees_to_cardinal(0.0), "N")
+        self.assertEqual(degrees_to_cardinal(90.0), "E")
+        self.assertEqual(degrees_to_cardinal(180.0), "S")
+        self.assertEqual(degrees_to_cardinal(270.0), "W")
+        self.assertEqual(degrees_to_cardinal(225.0), "SW")
+
+    def test_weather_engine_parsing_and_tooltip_formatting(self):
+        """Test WeatherForecastSummary formatting, 12-hour hourly forecast, and Open-Meteo attribution."""
+        from datetime import datetime, timezone
+        from weather_engine import (
+            WeatherForecastSummary,
+            CurrentWeatherItem,
+            HourlyForecastItem,
+        )
+
+        dt_now = datetime(2026, 8, 7, 14, 0, 0, tzinfo=timezone.utc)
+        summary = WeatherForecastSummary(
+            current=CurrentWeatherItem(
+                temp_f=72.4,
+                weather_code=2,
+                weather_desc="Partly Cloudy",
+                weather_icon="⛅",
+                short_label="Part Cloud",
+                wind_speed_mph=8.5,
+                wind_dir_deg=315.0,
+                wind_dir_cardinal="NW",
+            ),
+            hourly_forecast=[
+                HourlyForecastItem(
+                    dt_utc=dt_now,
+                    temp_f=73.0,
+                    weather_code=2,
+                    weather_desc="Partly Cloudy",
+                    weather_icon="⛅",
+                    wind_speed_mph=9.0,
+                    wind_dir_deg=320.0,
+                    wind_dir_cardinal="NW",
+                ),
+                HourlyForecastItem(
+                    dt_utc=datetime(2026, 8, 7, 15, 0, 0, tzinfo=timezone.utc),
+                    temp_f=75.0,
+                    weather_code=0,
+                    weather_desc="Clear Sky",
+                    weather_icon="☀️",
+                    wind_speed_mph=7.0,
+                    wind_dir_deg=300.0,
+                    wind_dir_cardinal="NW",
+                ),
+            ],
+            home_lat=38.3,
+            home_lon=-81.6,
+            fetch_time_utc=dt_now,
+            is_live=True,
+        )
+
+        html = summary.format_tooltip_html()
+        self.assertIn("Local Weather: <b>72°F</b> · Partly Cloudy", html)
+        self.assertIn("Wind: <b>8 mph</b> from <b>NW</b>", html)
+        self.assertIn("12-Hour Hourly Forecast:", html)
+        self.assertIn(">Time (UTC)</th>", html)
+        self.assertIn("14:00", html)
+        self.assertIn(">Temp</th>", html)
+        self.assertIn(">Condition</th>", html)
+        self.assertIn(">Wind</th>", html)
+        self.assertIn("73°F", html)
+        self.assertIn("Clear Sky", html)
+        self.assertIn("Open-Meteo.com", html)
+
+    def test_gui_weather_card_integration(self):
+        """Test GUI card_weather initialization and update upon weather fetch."""
+        from pota_hunter import POTAHunterApp
+        from weather_engine import WeatherForecastSummary, CurrentWeatherItem
+
+        window = POTAHunterApp()
+        self.assertIsNotNone(window.card_weather)
+        self.assertEqual(window.card_weather.lbl_title.text(), "LOCAL WEATHER")
+
+        summary = WeatherForecastSummary(
+            current=CurrentWeatherItem(
+                temp_f=68.0,
+                weather_code=0,
+                weather_desc="Clear Sky",
+                weather_icon="☀️",
+                short_label="Clear",
+                wind_speed_mph=5.0,
+                wind_dir_deg=180.0,
+                wind_dir_cardinal="S",
+            )
+        )
+        window._on_weather_fetched(summary)
+        self.assertIn("68°F", window.card_weather.lbl_value.text())
+        self.assertIn("☀️", window.card_weather.lbl_value.text())
+        self.assertIn("Open-Meteo.com", window.card_weather.toolTip())
+
+        # Cleanup
+        window.weather_timer.stop()
+        window.refresh_timer.stop()
+        window.utc_rollover_timer.stop()
+        window.utc_clock_timer.stop()
+        window.threadpool.waitForDone(1000)
+        window.close()
+
+    def test_p2p_park_name_location_tooltip(self):
+        """Test that setting a P2P park reference resolves the park name and updates tooltips."""
+        from pota_hunter import POTAHunterApp
+        window = POTAHunterApp()
+        window.chk_p2p.setChecked(True)
+        window.txt_p2p_park.setText("US-1845")
+        window.p2p_my_park = "US-1845"
+        window.on_p2p_park_lookup_finished({"reference": "US-1845", "name": "Kanawha State Forest", "grid": "EM98dh"})
+        self.assertEqual(window.p2p_my_park_name, "Kanawha State Forest")
+        self.assertIn("Kanawha State Forest", window.txt_p2p_park.toolTip())
+
+        # Cleanup
+        window.chk_p2p.setChecked(False)
+        window.weather_timer.stop()
+        window.startup_lightning_timer.stop()
+        window.refresh_timer.stop()
+        window.utc_rollover_timer.stop()
+        window.utc_clock_timer.stop()
+        window.threadpool.clear()
+        window.threadpool.waitForDone(2000)
         window.close()
 
 

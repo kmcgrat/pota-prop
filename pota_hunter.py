@@ -10,10 +10,10 @@ import os
 import sys
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-APP_VERSION = "26.8.5"
+APP_VERSION = "26.8.7"
 
 
 from PyQt6.QtCore import (
@@ -80,17 +80,23 @@ from lightning_engine import (
     fetch_regional_lightning_summary,
     reset_lightning_engine_location,
 )
+from weather_engine import (
+    WeatherForecastSummary,
+    fetch_local_weather_summary,
+)
 from propagation_engine import (
     ANTENNA_PRESETS,
     DEFAULT_ANTENNA_TYPE,
     DEFAULT_HOME_GRID,
     DEFAULT_TX_POWER_WATTS,
     POWER_PRESETS,
+    BandNoiseBreakdown,
     CallsignLocation,
     CallsignResolver,
     PropagationResult,
     SolarWeather,
     SpotEvidence,
+    compute_band_noise_matrix,
     fetch_live_solar_weather,
     is_self_spot,
     maidenhead_to_latlon,
@@ -259,7 +265,36 @@ QStatusBar {
     border-top: 1px solid #30363d;
     color: #8b949e;
 }
+
+QToolTip {
+    background-color: #161b22;
+    color: #e6edf3;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 12px;
+}
 """
+
+
+class WorkedParksTracker(dict):
+    """
+    Dictionary mapping park_ref (str) -> worked_utc_date (YYYY-MM-DD str).
+    Provides .add() and .discard() for backwards compatibility with set operations.
+    """
+
+    def add(self, ref: str, worked_date_utc: Optional[str] = None):
+        if not ref:
+            return
+        r = str(ref).strip().upper()
+        d = worked_date_utc or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self[r] = d
+
+    def discard(self, ref: str):
+        if not ref:
+            return
+        self.pop(str(ref).strip().upper(), None)
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -390,8 +425,39 @@ class ParkLookupWorker(QRunnable):
                 pass
 
 
+class FetchWeatherWorkerSignals(QObject):
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+
+class FetchWeatherWorker(QRunnable):
+    """Background worker to fetch Open-Meteo local weather summary."""
+
+    def __init__(self, lat: float, lon: float, location_name: Optional[str] = None, force_refresh: bool = False):
+        super().__init__()
+        self.lat = lat
+        self.lon = lon
+        self.location_name = location_name
+        self.force_refresh = force_refresh
+        self.signals = FetchWeatherWorkerSignals()
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            summary = fetch_local_weather_summary(self.lat, self.lon, location_name=self.location_name, force_refresh=self.force_refresh)
+            if summary:
+                self.signals.finished.emit(summary)
+        except Exception as e:
+            try:
+                self.signals.error.emit(str(e))
+            except RuntimeError:
+                pass
+
+
 class StatCard(QFrame):
     """Modern dashboard stat metric card."""
+    clicked = pyqtSignal()
 
     def __init__(
         self,
@@ -399,9 +465,13 @@ class StatCard(QFrame):
         value: str = "0",
         accent_color: str = "#58a6ff",
         parent=None,
+        is_clickable: bool = False,
     ):
         super().__init__(parent)
         self.accent_color = accent_color
+        self.is_clickable = is_clickable
+        if is_clickable:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setStyleSheet(
             f"""
@@ -433,6 +503,11 @@ class StatCard(QFrame):
         )
         layout.addWidget(self.lbl_value)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
     def set_value(self, val: str):
         val_str = str(val)
         self.lbl_value.setText(val_str)
@@ -461,6 +536,234 @@ class StatCard(QFrame):
         self.lbl_value.setStyleSheet(
             f"color: {accent_color}; font-size: {font_size}; font-weight: 800;"
         )
+
+
+class BandNoiseDialog(QDialog):
+    """
+    Dedicated modal dialog displaying real-time receiver noise floor and S-meter readings
+    across all amateur radio bands (160m to 6m) modeled via ITU-R P.372, diurnal ionospheric
+    solar elevation, and regional Blitzortung lightning telemetry.
+    """
+
+    def __init__(
+        self,
+        home_lat: float,
+        home_lon: float,
+        solar_weather: Optional[SolarWeather] = None,
+        lightning_summary: Optional[RegionalLightningSummary] = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.home_lat = home_lat
+        self.home_lon = home_lon
+        self.solar_weather = solar_weather or SolarWeather()
+        self.lightning_summary = lightning_summary
+        self.setWindowTitle("Amateur Band Receiver Noise Floor Matrix (ITU-R P.372 & Live QRN)")
+        self.resize(1020, 640)
+        self.setStyleSheet(DARK_STYLESHEET)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        # 1. Header Banner
+        header = QFrame()
+        header.setStyleSheet(
+            "background-color: #1c2128; border: 1px solid #30363d; border-radius: 8px; padding: 12px;"
+        )
+        h_layout = QVBoxLayout(header)
+        h_layout.setContentsMargins(8, 8, 8, 8)
+        h_layout.setSpacing(6)
+
+        title_lbl = QLabel("📡 Receiver Noise Floor & ITU-R P.372 Band Matrix")
+        title_lbl.setStyleSheet("color: #58a6ff; font-size: 18px; font-weight: 800;")
+        h_layout.addWidget(title_lbl)
+
+        # Telemetry summary line
+        light_act = self.lightning_summary.get_activity_level() if self.lightning_summary else None
+        light_txt = (
+            f"<span style='color:{light_act.color}; font-weight:bold;'>Level {light_act.level} ({light_act.label})</span>"
+            if light_act
+            else "<span style='color:#8b949e;'>Inactive</span>"
+        )
+        light_dist = (
+            f"Nearest: ~{self.lightning_summary.closest_storm_miles:.0f} mi"
+            if self.lightning_summary and self.lightning_summary.closest_storm_miles is not None and self.lightning_summary.closest_storm_miles < 999.0
+            else "No nearby storms"
+        )
+
+        sub_lbl = QLabel(
+            f"<b>QTH:</b> {self.home_lat:.3f}°, {self.home_lon:.3f}° &nbsp;|&nbsp; "
+            f"<b>Space Weather:</b> SFI {int(self.solar_weather.sfi)}, K={int(self.solar_weather.k_index)}, Flare: {self.solar_weather.xray_class} &nbsp;|&nbsp; "
+            f"<b>⚡ Regional Lightning:</b> {light_txt} ({light_dist})"
+        )
+        sub_lbl.setStyleSheet("color: #c9d1d9; font-size: 12px;")
+        h_layout.addWidget(sub_lbl)
+        layout.addWidget(header)
+
+        # 2. Table of Noise Breakdown across Amateur Bands
+        self.table = QTableWidget()
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels([
+            "Band",
+            "Frequency",
+            "⚡ Atmospheric (QRN)",
+            "🌌 Galactic (Space)",
+            "🏙️ Man-Made",
+            "Total Noise (Fa)",
+            "Noise Power (SSB)",
+            "📻 Est. S-Meter",
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setStyleSheet(
+            """
+            QTableWidget {
+                background-color: #0d1117;
+                gridline-color: #21262d;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+            }
+            QHeaderView::section {
+                background-color: #161b22;
+                color: #8b949e;
+                padding: 6px;
+                border: none;
+                border-bottom: 1px solid #30363d;
+                font-weight: 700;
+            }
+            QTableWidget::item {
+                padding: 6px;
+            }
+            """
+        )
+        layout.addWidget(self.table)
+
+        # 3. Explanatory Note Footer
+        note_box = QFrame()
+        note_box.setStyleSheet(
+            "background-color: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px;"
+        )
+        n_layout = QVBoxLayout(note_box)
+        n_layout.setContentsMargins(6, 4, 6, 4)
+        n_lbl = QLabel(
+            "<b>Noise Modeling Notes:</b> "
+            "• <b>Atmospheric (QRN)</b> models global diurnal ITU-R P.372 curves (night ducting vs day D-layer absorption) + live Blitzortung lightning surges (&le;750 mi). "
+            "• <b>Galactic (Space)</b> models cosmic radio emission traversing the ionosphere. "
+            "• <b>Man-Made</b> models quiet residential/rural baseline. "
+            "• <b>S-Meter Calibration:</b> Standard IARU HF baseline (S9 = -73 dBm, 6 dB/S-unit, S0 = -127 dBm in 2.4 kHz SSB bandwidth)."
+        )
+        n_lbl.setWordWrap(True)
+        n_lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
+        n_layout.addWidget(n_lbl)
+        layout.addWidget(note_box)
+
+        # 4. Buttons
+        btn_layout = QHBoxLayout()
+        btn_close = QPushButton("Close")
+        btn_close.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #21262d;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 6px 20px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #30363d;
+                color: #ffffff;
+            }
+            """
+        )
+        btn_close.clicked.connect(self.accept)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+
+        # Populate data
+        self.populate_data()
+
+    def populate_data(self):
+        matrix = compute_band_noise_matrix(
+            self.home_lat,
+            self.home_lon,
+            solar_weather=self.solar_weather,
+            lightning_summary=self.lightning_summary,
+        )
+        self.table.setRowCount(len(matrix))
+
+        for row, item in enumerate(matrix):
+            # Band Name
+            it_band = QTableWidgetItem(f"  {item.band}")
+            it_band.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            it_band.setForeground(QColor("#58a6ff"))
+
+            # Frequency
+            it_freq = QTableWidgetItem(f"{item.freq_mhz:.3f} MHz")
+            it_freq.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_freq.setForeground(QColor("#8b949e"))
+
+            # Atmospheric
+            if item.qrn_surge_db >= 1.0:
+                atm_str = f"{item.f_atm_total_db:.1f} dB  (⚡ +{item.qrn_surge_db:.1f}dB)"
+                col_atm = "#ffa657"
+            else:
+                atm_str = f"{item.f_atm_total_db:.1f} dB"
+                col_atm = "#c9d1d9"
+            it_atm = QTableWidgetItem(atm_str)
+            it_atm.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_atm.setForeground(QColor(col_atm))
+
+            # Galactic
+            it_gal = QTableWidgetItem(f"{item.f_gal_db:.1f} dB")
+            it_gal.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_gal.setForeground(QColor("#bc8cff"))
+
+            # Man-made
+            it_man = QTableWidgetItem(f"{item.f_man_db:.1f} dB")
+            it_man.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_man.setForeground(QColor("#8b949e"))
+
+            # Total Fa
+            it_fa = QTableWidgetItem(f"{item.f_a_total_db:.1f} dB")
+            it_fa.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_fa.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            it_fa.setForeground(QColor("#f1e05a" if item.is_elevated_qrn else "#e6edf3"))
+
+            # Noise Power
+            it_pwr = QTableWidgetItem(f"{item.noise_power_dbm:.1f} dBm")
+            it_pwr.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_pwr.setForeground(QColor("#8b949e"))
+
+            # S-Meter Badge
+            if item.s_units_val >= 8.0:
+                s_col = "#f85149" # Red
+            elif item.s_units_val >= 4.0:
+                s_col = "#ffa657" # Orange
+            elif item.s_units_val >= 2.0:
+                s_col = "#f1e05a" # Yellow
+            else:
+                s_col = "#7ee787" # Green
+
+            it_smeter = QTableWidgetItem(f" {item.s_units_label} ")
+            it_smeter.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_smeter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            it_smeter.setForeground(QColor(s_col))
+
+            self.table.setItem(row, 0, it_band)
+            self.table.setItem(row, 1, it_freq)
+            self.table.setItem(row, 2, it_atm)
+            self.table.setItem(row, 3, it_gal)
+            self.table.setItem(row, 4, it_man)
+            self.table.setItem(row, 5, it_fa)
+            self.table.setItem(row, 6, it_pwr)
+            self.table.setItem(row, 7, it_smeter)
 
 
 class SpotHistoryDialog(QDialog):
@@ -693,20 +996,37 @@ class SpotHistoryDialog(QDialog):
 class AboutDialog(QDialog):
     """
     Modal dialog displaying software version, application overview, key features,
-    and helpful web links for POTA Hunter.
+    safety disclaimers, and helpful web links for POTA Hunter.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("About POTA Hunter")
-        self.setFixedSize(580, 530)
+        self.resize(650, 720)
+        self.setMinimumSize(600, 580)
         self.setStyleSheet(DARK_STYLESHEET)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(12)
+
+        # Scrollable content container
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                background-color: #0d1117;
+            }
+        """)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(12)
 
-        # App Header (No boxes or frame containers)
+        # App Header
         app_name = QLabel("POTA Hunter")
         app_name.setStyleSheet("font-size: 24px; font-weight: bold; color: #58a6ff;")
         layout.addWidget(app_name)
@@ -725,8 +1045,8 @@ class AboutDialog(QDialog):
         desc_label = QLabel(
             "POTA Hunter compares your historical hunted parks log against live active spots "
             "from pota.app in real-time. It provides propagation estimations, multi-layer ionospheric "
-            "modeling (1E–4F2), skip-zone cutoff calculations, and regional 750-mile "
-            "Blitzortung.org lightning QRN monitoring."
+            "modeling (1E–4F2), skip-zone cutoff calculations, Open-Meteo local weather forecasts, "
+            "and regional 750-mile Blitzortung.org lightning QRN monitoring."
         )
         desc_label.setWordWrap(True)
         desc_label.setStyleSheet("color: #8b949e; line-height: 1.4; font-size: 12px;")
@@ -743,6 +1063,8 @@ class AboutDialog(QDialog):
             "• Multi-layer ionospheric modeling (E, F1, F2) & multi-hop ray tracing",
             "• Skip-zone cutoff calculations based on operating frequency and distance",
             "• 750-mile Blitzortung.org lightning stream & ITU-R P.372 QRN noise calculations",
+            "• Storm cell trajectory tracking, ground motion vectors, & Time of Arrival (TOA) estimates",
+            "• Open-Meteo local weather integration with 12-hour hourly forecast & 24-hour UTC times",
             "• Station link budget calculations with transmitter power (Watts) & antenna patterns",
             "• Auto-comparison with local hunted CSV log, P2P portable mode & worked status tracking",
         ]
@@ -753,6 +1075,29 @@ class AboutDialog(QDialog):
             features_layout.addWidget(lbl)
 
         layout.addWidget(features_box)
+
+        # Safety Disclaimer & Limitation of Liability Box
+        disclaimer_box = QGroupBox("Safety Disclaimer & Limitation of Liability")
+        disclaimer_layout = QVBoxLayout(disclaimer_box)
+        disclaimer_layout.setContentsMargins(12, 10, 12, 10)
+
+        disclaimer_lbl = QLabel(
+            "<b>FOR RECREATIONAL & INFORMATIONAL USE ONLY:</b> POTA Hunter is provided solely for "
+            "amateur radio recreation and educational modeling. Weather forecasts, lightning motion tracking, "
+            "Time of Arrival (TOA) estimates, convective alerts, and propagation models must <b>NOT</b> be relied upon "
+            "for life safety, weather hazard prediction, or field emergency planning. Severe weather, lightning strikes, "
+            "and atmospheric conditions can change, intensify, or strike rapidly without warning or remote detection. "
+            "Operators remain solely responsible for field safety. The developer and contributors disclaim any and all liability "
+            "for personal injury, property damage, equipment loss, or inaccuracies arising out of or in connection with the use of "
+            "or reliance upon this software."
+        )
+        disclaimer_lbl.setWordWrap(True)
+        disclaimer_lbl.setStyleSheet("color: #ffa657; font-size: 11px; line-height: 1.4; border: none; background: transparent;")
+        disclaimer_layout.addWidget(disclaimer_lbl)
+        layout.addWidget(disclaimer_box)
+
+        scroll.setWidget(content)
+        main_layout.addWidget(scroll, stretch=1)
 
         # Footer Buttons
         btn_layout = QHBoxLayout()
@@ -796,7 +1141,7 @@ class AboutDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(close_btn)
 
-        layout.addLayout(btn_layout)
+        main_layout.addLayout(btn_layout)
 
 
 class DocumentationDialog(QDialog):
@@ -865,8 +1210,8 @@ class DocumentationDialog(QDialog):
         <h3 style="color: #7ee787;">Step-by-Step Initial Setup:</h3>
         <ol>
             <li><b>Download Your Log from pota.app:</b> Open <a href="https://pota.app" style="color: #7ee787;">pota.app</a> in your web browser and sign in. Navigate to <b>Profile</b> &rarr; <b>My Stats</b>, scroll down to the <b>Hunted Parks</b> table, and click <b>Export CSV</b>. This saves <code>hunter_parks.csv</code> to your Downloads folder.</li>
-            <li><b>Important Download Tip (Browser File Duplicates):</b> When you download a new export, web browsers automatically append <code>(1)</code> or <code>(2)</code> to the filename if an older file exists (e.g., <code>hunter_parks (1).csv</code>). Always delete or overwrite your old <code>hunter_parks.csv</code> in your Downloads folder before downloading a new one, or click <b>Browse CSV File</b> in POTA Hunter to select the exact file!</li>
-            <li><b>Load Into POTA Hunter:</b> Click <i>File &rarr; Reload Hunter Log CSV</i> or use the <b>Browse CSV File</b> button to select your file. The app compares active spots against your log, highlighting <b>NEW (unhunted)</b> parks versus parks you have already worked.</li>
+            <li><b>Important Download Tip (Browser File Duplicates):</b> When you download a new export, web browsers automatically append <code>(1)</code> or <code>(2)</code> to the filename if an older file exists (e.g., <code>hunter_parks (1).csv</code>). Always delete or overwrite your old <code>hunter_parks.csv</code> in your Downloads folder before downloading a new one, or use the <b>Select POTA Log</b> button in POTA Hunter to choose the exact file.</li>
+            <li><b>Load Into POTA Hunter:</b> Click the <b>Select POTA Log</b> button on the top toolbar to choose your <code>hunter_parks.csv</code> file. Mousing over the <b>Select POTA Log</b> button reveals the active file path in a hover tooltip. Click <b>Reload Log</b> (or press <i>Ctrl+O</i>) anytime to refresh your stats after saving new logs. The app compares active spots against your log, highlighting <b>NEW (unhunted)</b> parks versus parks you have already worked.</li>
             <li><b>Operator Callsign:</b> Enter your callsign in the <b>My Call</b> field. The app automatically looks up your home Maidenhead grid locator from online databases.</li>
             <li><b>Home Grid:</b> Enter your Maidenhead Grid Locator (e.g. <code>EM98dh</code>) to establish your exact QTH reference point for distance, bearing, and propagation calculations.</li>
         </ol>
@@ -898,7 +1243,16 @@ class DocumentationDialog(QDialog):
         <p>When you complete a QSO with an active park, you can update your session tracking:</p>
         <ul>
             <li><b>Status Cell Dropdown:</b> Click the drop-down menu in the <b>Status</b> column of the activator's row and select <b>Mark [WORKED]</b>. The row immediately turns green, and your metric counters update in real-time.</li>
-            <li><b>Right-Click Menu:</b> Right-click anywhere on the row and select <b>Toggle Worked Status</b>.</li>
+            <li><b>Right-Click Menu:</b> Right-click anywhere on the row and select <b>Mark Park as [WORKED]</b>.</li>
+            <li><b>Action Bar:</b> Select any row and click the <b>Mark [WORKED]</b> button at the bottom right.</li>
+        </ul>
+
+        <h3 style="color: #7ee787;">00:00 UTC New Day Rollover & <code>Hunted(W)</code> Badge:</h3>
+        <p>Under official POTA rules, a new UTC day (00:00Z) resets the park QSO eligibility window, allowing you to hunt and log that park again for daily awards. When 00:00 UTC rolls over while a park is still active:</p>
+        <ul>
+            <li>Parks worked on the previous UTC day automatically transition to <b><code>Hunted(W)</code></b> (or <b><code>[P2P] Hunted(W)</code></b> in Park-to-Park mode).</li>
+            <li>The <b>(W)</b> denotes that the park was worked during the previous UTC day and is now eligible to be hunted again today.</li>
+            <li>Once you work the park on the new UTC day, selecting <b>Mark [WORKED] Today</b> updates its badge back to <b><code>[WORKED]</code></b>.</li>
         </ul>
 
         <h3 style="color: #7ee787;">Automatic Re-Spotting Prompt:</h3>
@@ -921,6 +1275,7 @@ class DocumentationDialog(QDialog):
             <tr><td><b style="color: #58a6ff;">F1</b></td><td>Open About POTA Hunter window</td></tr>
             <tr><td><b style="color: #58a6ff;">F2 / Ctrl+H</b></td><td>Open this Documentation & Guide window</td></tr>
             <tr><td><b style="color: #58a6ff;">F5</b></td><td>Trigger immediate manual spot & weather refresh</td></tr>
+            <tr><td><b style="color: #58a6ff;">F6</b></td><td>Open Receiver Band Noise Floor Matrix dialog</td></tr>
             <tr><td><b style="color: #58a6ff;">Ctrl+O</b></td><td>Reload / Browse Hunter Log CSV</td></tr>
             <tr><td><b style="color: #58a6ff;">Ctrl+S</b></td><td>Export current table view to CSV</td></tr>
             <tr><td><b style="color: #58a6ff;">Ctrl+Q</b></td><td>Exit Application</td></tr>
@@ -979,51 +1334,131 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">8. Regional Lightning & Atmospheric Noise Engine (Blitzortung Telemetry & QRN Modeling)</h2>
-        <p>Thunderstorms and lightning static crashes (QRN) elevate the receiver noise floor. POTA Hunter monitors regional lightning activity and estimates noise impact:</p>
+        <h2 style="color: #58a6ff;">8. Regional Lightning & Convective Threat Engine (Hybrid NWS & Blitzortung Telemetry)</h2>
+        <p>Thunderstorms and lightning static crashes (QRN) create intense wideband noise pulses that degrade receiver signal-to-noise ratios. POTA Hunter combines official weather alerts with live stroke telemetry to monitor regional storms and protect station equipment:</p>
 
-        <h3 style="color: #7ee787;">1. Regional Lightning Monitoring (via Blitzortung.org):</h3>
+        <h3 style="color: #7ee787;">1. Hybrid Architecture: Instant Bootstrap & Live WebSocket Telemetry:</h3>
         <ul>
-            <li><b>Live WebSocket Streaming:</b> POTA Hunter connects to the <a href="https://www.blitzortung.org" style="color: #7ee787;">Blitzortung.org</a> community lightning detection network via a background streaming WebSocket.</li>
-            <li><b>750-Mile (1,200 km) Regional Monitoring Radius:</b> The engine processes lightning strokes occurring within a 750-mile radius centered on your home QTH (or your active P2P activator park).</li>
-            <li><b>60-Minute Sliding Window & Time-Decay Weighting:</b> Incoming strikes are buffered across a 60-minute window with age-based weighting:
-                <ul>
-                    <li><b>0–10 minutes old:</b> 100% weight (1.0) — Active, immediate local storm activity</li>
-                    <li><b>10–20 minutes old:</b> 70% weight (0.70) — Recent storm activity</li>
-                    <li><b>20–30 minutes old:</b> 45% weight (0.45) — Mature / drifting cells</li>
-                    <li><b>30–60 minutes old:</b> 20% weight (0.20) — Residual activity</li>
-                </ul>
-            </li>
-            <li><b>Spatial Density & Storm Cell Clustering:</b> Strikes are grouped spatially by distance and bearing to compute strike rates (<code>strikes/min</code> and <code>strikes/hr</code>).</li>
-            <li><b>Automatic Location & Callsign Reset:</b> When you change your callsign or Maidenhead grid, the lightning engine resets its buffer and re-centers its 750-mile monitoring radius for your new QTH.</li>
+            <li><b>Instant NOAA NWS Convective Alerts:</b> On startup or whenever you change your Maidenhead operating grid, POTA Hunter immediately queries active NOAA NWS Convective Alerts (Severe Thunderstorm, Tornado, Special Marine, and Flash Flood warnings) within your 750-mile monitoring radius. This provides instant storm awareness without waiting for background stream buffers.</li>
+            <li><b>Live Blitzortung.org WebSocket Stream:</b> The application maintains an asynchronous background WebSocket connection to the <a href="https://www.blitzortung.org" style="color: #7ee787;">Blitzortung.org</a> community detection network, receiving live microsecond stroke telemetry worldwide.</li>
+            <li><b>15-Minute Smooth Blending Warmup:</b> The engine smoothly blends NWS alert models into real-time Blitzortung strike counts over a 15-minute warmup curve:
+                <br /><code>blended_rate = (1 - &alpha;) × NWS_rate + &alpha; × Live_rate</code>
+                <br />Once the live buffer matures (&alpha; = 1.0), the engine operates purely on real-time strike density, spatial clustering, and observed flash rates.</li>
+            <li><b>750-Mile (1,200 km) Regional Monitoring Radius:</b> Thunderstorm static can propagate up to ~750 miles via groundwave and night skywave. All strikes outside 750 miles are filtered out.</li>
+            <li><b>60-Minute Sliding Buffer & Age Weighting:</b> Incoming strikes are retained in a 60-minute buffer with time-decay weighting (1.0 for &lt;10m, 0.70 for 10–20m, 0.45 for 20–30m, 0.20 for 30–60m).</li>
+            <li><b>Spatial Density & Storm Cell Clustering:</b> Strikes are grouped spatially to compute exact distance, bearing, and strike rates (<code>strikes/min</code>) for each thunderstorm cell.</li>
         </ul>
 
-        <h3 style="color: #7ee787;">2. How Lightning QRN Noise Surges and Activity Levels are Calculated:</h3>
+        <h3 style="color: #7ee787;">2. Standardized 1-to-10 Lightning Threat & Safety Scale:</h3>
+        <table border="0" cellpadding="5" cellspacing="0" style="color: #c9d1d9; font-size: 12px; margin-left: 6px; margin-bottom: 10px;">
+            <tr style="color: #8b949e; border-bottom: 1px solid #30363d;">
+                <th style="text-align: left; padding-right: 10px;">Level</th>
+                <th style="text-align: left; padding-right: 12px;">Threat Category</th>
+                <th style="text-align: left; padding-right: 14px;">Storm Proximity</th>
+                <th style="text-align: left;">Station Safety & Operating Guidance</th>
+            </tr>
+            <tr>
+                <td><b style="color: #2ea043;">Level 1</b></td>
+                <td>Clear / Quiet</td>
+                <td>&gt; 750 miles</td>
+                <td>Normal operating conditions. Low background noise on all bands.</td>
+            </tr>
+            <tr>
+                <td><b style="color: #3fb950;">Level 2–3</b></td>
+                <td>Very Low / Low</td>
+                <td>350–750 miles</td>
+                <td>Distant storm cells. Negligible background sferics; 20m and above unaffected.</td>
+            </tr>
+            <tr>
+                <td><b style="color: #d29922;">Level 4–5</b></td>
+                <td>Moderate / Elevated</td>
+                <td>140–350 miles</td>
+                <td>Regional storm clusters. Noticeable static crashes on 40m/80m.</td>
+            </tr>
+            <tr>
+                <td><b style="color: #f0883e;">Level 6</b></td>
+                <td>Notable</td>
+                <td>85–140 miles</td>
+                <td>Frequent static crashes on lower bands. Monitor regional storm movement.</td>
+            </tr>
+            <tr>
+                <td><b style="color: #e06c3a;">Level 7</b></td>
+                <td>Storms Nearby</td>
+                <td>45–85 miles</td>
+                <td>Heavy QRN on 160m–40m. Consider shifting to higher bands (20m–10m).</td>
+            </tr>
+            <tr>
+                <td><b style="color: #da3633;">Level 8</b></td>
+                <td>Close Storms / Frequent</td>
+                <td>20–45 miles (or frequent)</td>
+                <td>Heavy local QRN (S7–S9 static). Storms approaching — prepare to shut down.</td>
+            </tr>
+            <tr>
+                <td><b style="color: #f85149;">Level 9</b></td>
+                <td>⚠️ Very Close Proximity</td>
+                <td>8–20 miles</td>
+                <td><b>DISCONNECT ADVISORY:</b> Thunderstorms within 20 miles. High risk of electrostatic induction. Disconnect feedlines and rotor cables.</td>
+            </tr>
+            <tr>
+                <td><b style="color: #ff2a55;">Level 10</b></td>
+                <td>🚨 Immediate Hazard</td>
+                <td>&lt; 8 miles</td>
+                <td><b>DANGER:</b> Lightning in immediate vicinity! Unplug all rigs, disconnect feedlines, and disconnect AC power cords immediately.</td>
+            </tr>
+        </table>
+
+        <h3 style="color: #7ee787;">3. Interactive Lightning Dashboard Card & Trajectory Motion Tracking:</h3>
+        <p>The <b>Lightning</b> card in the top dashboard bar displays your current threat score and label. Hovering your mouse over the card reveals an extensive diagnostic popup showing:</p>
         <ul>
-            <li><b>Inverse-Distance Decay:</b> Electromagnetic pulses (sferics) propagate through the Earth-ionosphere waveguide; noise surge intensity scales with distance following <code>1 / d^1.8</code>.</li>
-            <li><b>Frequency-Dependent QRN Susceptibility:</b> Lightning electromagnetic energy is concentrated in the low-frequency spectrum and decreases on higher bands following <code>1 / f^1.3</code>:
-                <ul>
-                    <li><b>160m:</b> Higher noise surge impact</li>
-                    <li><b>80m:</b> Substantial noise surge impact</li>
-                    <li><b>40m:</b> Moderate noise surge impact</li>
-                    <li><b>20m:</b> Minor noise floor increase</li>
-                    <li><b>15m / 10m:</b> Minimal impact</li>
-                </ul>
-            </li>
-            <li><b>Noise Floor & Link Budget Impact:</b> The calculated QRN surge (&Delta;F<sub>QRN</sub> in dB) is factored into the ITU-R P.372 atmospheric noise floor calculation.</li>
-            <li><b>1-to-10 Lightning Scale:</b>
-                <ul>
-                    <li><b>Level 1–3 (Clear / Low):</b> No storms or distant sferics (300–750 mi). Low noise floor.</li>
-                    <li><b>Level 4–6 (Moderate / High Regional):</b> Active thunderstorms within 85–300 mi. Elevated QRN (+8 to +16 dB).</li>
-                    <li><b>Level 7–8 (Approaching / Nearby Storms):</b> Lightning within 30–100 mi. Heavy static crashes.</li>
-                    <li><b>Level 9–10 (⚠️ DISCONNECT ADVISORY / DANGER):</b> Lightning within 15–30 miles (Level 9: Very Close Proximity) or immediate vicinity &lt; 15 miles (Level 10: Immediate Hazard). <b>Consider disconnecting coax feedlines, rotor cables, and AC power to protect station equipment from induced voltage surges and direct strikes.</b></li>
-                </ul>
-            </li>
+            <li><b>Nearest NWS Convective Alert:</b> Alert headline, distance, bearing, active strike count in the polygon, and time remaining until warning product expiration.</li>
+            <li><b>Nearest Active Lightning Clusters & Trajectory Tracking (Motion / TOA):</b> Evaluates historical stroke centroids over time to derive storm ground speed (mph) and cardinal movement direction. If a storm cell is approaching your QTH (within ~35 miles CPA), it displays the estimated <b>Time of Arrival (TOA in minutes)</b> (e.g. <code>28 mph → NE (TOA 35m)</code>). Receding or lateral storms display <code>(TOA: NA)</code>.</li>
+            <li><b>Regional Strike Totals:</b> Aggregate strike count and flash rate across the entire 750-mile monitoring radius.</li>
+            <li><b>Band QRN Noise Surges:</b> Estimated static surge in dB for 160m, 80m, 40m, and 20m.</li>
+        </ul>
+
+        <h3 style="color: #7ee787;">4. Open-Meteo Local Weather & 12-Hour Hourly Forecast:</h3>
+        <p>The <b>Local Weather</b> card on the top stats bar displays your current local temperature and weather condition icon (e.g. <code>72°F ⛅ Part Cloud</code>). Hovering your mouse over the card opens a detailed 12-hour hourly forecast popup containing:</p>
+        <ul>
+            <li><b>Current Observations:</b> Temperature, condition description, and surface wind vector.</li>
+            <li><b>12-Hour Hourly Forecast Table:</b> Displays upcoming hourly predictions for <b>Time (UTC)</b> in 24-hour format, <b>Temp (°F)</b>, <b>Condition</b> icon/description, and <b>Wind (mph &amp; direction)</b>.</li>
+            <li><b>Attribution:</b> Weather data is provided by <a href="https://open-meteo.com/" style="color: #58a6ff;">Open-Meteo.com</a> (CC-BY 4.0).</li>
         </ul>
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">9. Link Budget, Antenna Elevation Gain & Signal-to-Noise Ratio (SNR)</h2>
+        <h2 style="color: #58a6ff;">9. Receiver Band Noise Floor Matrix & ITU-R P.372 Modeling (F6)</h2>
+        <p>A station's ability to copy weak POTA activators depends directly on the receiver noise floor. POTA Hunter implements a comprehensive, 11-band noise floor engine modeled after <b>ITU-R P.372-16</b> and real-time environmental telemetry:</p>
+
+        <h3 style="color: #7ee787;">1. The Band Noise Dashboard Card & Modal Matrix (F6):</h3>
+        <ul>
+            <li><b>Band Noise Stat Card:</b> Located on the top stats bar next to the Lightning card. Displays quick noise readings on reference bands (e.g. <code>40m: S1 | 20m: S0</code>) with dynamic color coding (Green/Blue for quiet, Yellow/Orange for elevated noise, Red for stormy conditions).</li>
+            <li><b>Opening the Matrix Window:</b> Click the <b>Band Noise</b> card, press <b>F6</b>, or select <i>View &rarr; Receiver Band Noise Floor Matrix (F6)</i> from the menu bar to open the full matrix dialog.</li>
+        </ul>
+
+        <h3 style="color: #7ee787;">2. ITU-R P.372 Noise Floor Components & Diurnal Modeling:</h3>
+        <p>For each amateur band from 160m to 6m, POTA Hunter calculates the individual noise components that combine to form the total antenna noise figure (F<sub>a</sub>):</p>
+        <ul>
+            <li><b>Base Atmospheric Noise (F<sub>atm</sub>) & Diurnal Day/Night Variation:</b> Atmospheric noise originates from tropical and regional lightning discharges propagating through the Earth-ionosphere waveguide.
+                <ul>
+                    <li><b>Daytime:</b> Solar radiation creates a dense D-layer (75 km), absorbing low-frequency skywaves and resulting in a lower atmospheric noise floor.</li>
+                    <li><b>Nighttime:</b> The D-layer vanishes after sunset. Thunderstorm static from across the globe propagates with minimal absorption, causing nighttime noise on 160m and 80m to rise by <b>+10 to +20 dB (2 to 3+ S-units)</b>. POTA Hunter models this solar diurnal curve based on local solar elevation at your QTH.</li>
+                </ul>
+            </li>
+            <li><b>Lightning QRN Surge (&Delta;F<sub>QRN</sub>):</b> Real-time noise injected from convective storm cells within 750 miles based on live Blitzortung telemetry.</li>
+            <li><b>Total Atmospheric Noise (F<sub>atm, total</sub>):</b> The combination of diurnal baseline noise and local thunderstorm surges: <code>F_atm,total = F_atm_base + &Delta;F_QRN</code>.</li>
+            <li><b>Cosmic / Galactic Background Noise (F<sub>gal</sub>):</b> Extraterrestrial radio noise from the galactic plane, dominant on the upper HF and VHF bands: <code>F_gal = 52 - 23 log10(f_MHz)</code>.</li>
+            <li><b>Man-Made Environmental Baseline (F<sub>man</sub>):</b> Standard quiet residential/rural man-made noise floor: <code>F_man = 53.6 - 28.6 log10(f_MHz)</code>.</li>
+            <li><b>Total Antenna Noise Figure (F<sub>a</sub>):</b> The power-sum of all uncorrelated noise figures:
+                <br /><code>F_a = 10 log10( 10^(F_atm,total / 10) + 10^(F_gal / 10) + 10^(F_man / 10) )</code></li>
+            <li><b>Receiver Noise Power in Standard SSB Bandwidth (P<sub>noise</sub>):</b> Noise power in a standard 2,400 Hz communications receiver:
+                <br /><code>P_noise (dBm) = -174 dBm/Hz + 10 log10(2400 Hz) + F_a = -140.2 dBm + F_a</code></li>
+            <li><b>S-Meter Reading Calibration (IARU Standard):</b> Standard HF calibration where <b>S9 = -73 dBm (50 &mu;V)</b>, <b>6 dB per S-unit</b>, and <b>S0 = -127 dBm</b>:
+                <br /><code>S-Units = (P_noise_dBm - (-127 dBm)) / 6.0 dB</code></li>
+        </ul>
+
+        <hr style="border: 1px solid #30363d;" />
+
+        <h2 style="color: #58a6ff;">10. Link Budget, Antenna Elevation Gain & Signal-to-Noise Ratio (SNR)</h2>
         <p>POTA Hunter calculates an RF link budget for every active spot using standard transmission equations:</p>
 
         <h3 style="color: #7ee787;">1. Path Loss Formulation (L<sub>b</sub>):</h3>
@@ -1043,7 +1478,7 @@ class DocumentationDialog(QDialog):
         <h3 style="color: #7ee787;">3. Receiver Signal Power & Noise Floor:</h3>
         <ul>
             <li><b>Received Signal Power (S<sub>dBW</sub>):</b> <code>S = P_tx_dBW + G_tx(&Delta;, f) - L_b - 4.0 dB (portable activator offset)</code></li>
-            <li><b>Total Receiver Noise Power (N<sub>dBW</sub>):</b> <code>N = -204 + 10 log10(BW_Hz) + F_a + &Delta;F_QRN</code>, where <code>F_a</code> is the ITU-R P.372 atmospheric/man-made noise figure and <code>&Delta;F_QRN</code> is the regional lightning surge.</li>
+            <li><b>Total Receiver Noise Power (N<sub>dBW</sub>):</b> <code>N = -204 + 10 log10(BW_Hz) + F_a</code>, where <code>F_a</code> is the ITU-R P.372 antenna noise figure incorporating both diurnal atmospheric noise and regional lightning surges.</li>
             <li><b>Predicted SNR:</b> <code>SNR_dB = S_dBW - N_dBW</code>.</li>
             <li><b>Circuit Reliability (REL):</b> Modeled via log-normal error distribution:
                 <br /><code>REL = 0.5 × [1 + erf((SNR - SNR_req) / (sqrt(2) × &sigma;_fading))] × 100%</code></li>
@@ -1051,7 +1486,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">10. Space Weather Telemetry: NOAA Solar Flares, PSKReporter & QRT Detection</h2>
+        <h2 style="color: #58a6ff;">11. Space Weather Telemetry: NOAA Solar Flares, PSKReporter & QRT Detection</h2>
         <h3 style="color: #7ee787;">Geomagnetic Indices: Planetary K-Index vs. Planetary A-Index:</h3>
         <ul>
             <li><b>K-Index (0 to 9, 3-Hour Metric):</b> Measures geomagnetic activity. K &le; 2 is quiet; K &ge; 4 indicates disturbed conditions.</li>
@@ -1073,7 +1508,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">11. Tooltip Propagation Outcomes & Telemetry Reference Guide</h2>
+        <h2 style="color: #58a6ff;">12. Tooltip Propagation Outcomes & Telemetry Reference Guide</h2>
         <p>When you hover your mouse over any <b>Score</b> badge or row in the table, POTA Hunter displays a diagnostic popup. Below is a reference of the telemetry lines:</p>
         
         <h3 style="color: #7ee787;">Telemetry Elements:</h3>
@@ -1095,6 +1530,18 @@ class DocumentationDialog(QDialog):
             <li><b>6m Summer Sporadic-E Skip Opening:</b> Seasonal E-layer skip openings on 6m.</li>
             <li><b>Activator QRT (Off the air):</b> Activator station has shut down (QSO score = 0).</li>
         </ul>
+
+        <br />
+        <h1 style="color: #f85149; font-size: 18px; margin-top: 16px; border-bottom: 2px solid #f85149; padding-bottom: 6px;">PART III: FIELD SAFETY DISCLAIMER & LIMITATION OF LIABILITY</h1>
+
+        <p style="color: #ffa657; font-weight: bold; font-size: 13px;">PLEASE READ CAREFULLY BEFORE USING THIS SOFTWARE IN THE FIELD:</p>
+        <p><b>1. Recreational & Educational Purpose Only:</b> POTA Hunter is provided strictly for recreational amateur radio operating, propagation modeling, and educational interest. All weather forecasts, lightning cluster motion tracking, Time of Arrival (TOA) estimates, NOAA NWS convective alert warnings, band noise calculations, and ionospheric propagation scores are generated by automated computer models and third-party network feeds.</p>
+        
+        <p><b>2. NOT FOR LIFE SAFETY OR EMERGENCY USE:</b> This software must <b>NEVER</b> be relied upon as a primary source for life safety decisions, weather hazard prediction, lightning protection, or emergency field planning. Severe weather, lightning strikes, electrostatic discharges, and atmospheric conditions can change, intensify, or strike rapidly without warning or detection by remote sensors.</p>
+        
+        <p><b>3. Operator Field Safety Responsibility:</b> Amateur radio operators operating portable in parks or at fixed station locations are solely responsible for maintaining situational awareness, observing local environmental conditions, and taking appropriate safety precautions (including immediately shutting down, disconnecting antenna feedlines, grounding equipment, and seeking proper shelter during lightning activity).</p>
+        
+        <p><b>4. Complete Limitation of Liability:</b> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE DEVELOPER(S), AUTHOR(S), OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING BUT NOT LIMITED TO PERSONAL INJURY, LOSS OF LIFE, PROPERTY DAMAGE, EQUIPMENT DAMAGE, OR INACCURACIES) ARISING OUT OF OR IN CONNECTION WITH THE USE, RELIANCE UPON, OR INABILITY TO USE THIS SOFTWARE.</p>
         """
 
         docs_text.setText(docs_html)
@@ -1154,6 +1601,7 @@ class POTAHunterApp(QMainWindow):
         self.show_tooltips = settings.value("show_tooltips", True, type=bool)
         self.p2p_mode = settings.value("p2p_mode", False, type=bool)
         self.p2p_my_park = str(settings.value("p2p_my_park", "")).strip().upper()
+        self.p2p_my_park_name = ""
         self.tx_power = float(settings.value("tx_power", DEFAULT_TX_POWER_WATTS))
         self.antenna_type = str(settings.value("antenna_type", DEFAULT_ANTENNA_TYPE)).strip()
         self.filter_status_idx = 0  # Always start with 'All' filter
@@ -1161,11 +1609,19 @@ class POTAHunterApp(QMainWindow):
         self.filter_band = str(settings.value("filter_band", "All Bands")).strip()
         self.filter_mode = str(settings.value("filter_mode", "All Modes")).strip()
         self.refresh_interval_idx = settings.value("refresh_interval_idx", 2, type=int)
-        saved_worked = settings.value("manually_worked_parks", [])
-        if isinstance(saved_worked, list):
-            self.manually_worked_parks = set(str(x).strip().upper() for x in saved_worked if x)
-        else:
-            self.manually_worked_parks = set()
+        saved_worked = settings.value("manually_worked_parks", {})
+        self.manually_worked_parks = WorkedParksTracker()
+        today_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if isinstance(saved_worked, dict):
+            for k, v in saved_worked.items():
+                if k:
+                    self.manually_worked_parks.add(str(k).strip().upper(), str(v).strip() if v else today_utc_str)
+        elif isinstance(saved_worked, list):
+            for x in saved_worked:
+                if x:
+                    self.manually_worked_parks.add(str(x).strip().upper(), today_utc_str)
+
+        self._last_evaluated_utc_date = today_utc_str
         self.solar_weather = SolarWeather()
         self.lightning_summary: Optional[RegionalLightningSummary] = None
         self._is_fetching = False
@@ -1174,7 +1630,32 @@ class POTAHunterApp(QMainWindow):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.fetch_spots)
 
+        # Adaptive Startup Lightning Refresh Timer:
+        # Every 5 seconds for the first 30 seconds, then every 10 seconds for the next 30 seconds.
+        self.startup_lightning_start_time = time.time()
+        self.startup_lightning_timer = QTimer(self)
+        self.startup_lightning_timer.timeout.connect(self._on_startup_lightning_tick)
+        self.startup_lightning_timer.start(5000)
+
+        # UTC Day 00Z Rollover Timer (checks every 15s for 00Z day boundary crossing)
+        self.utc_rollover_timer = QTimer(self)
+        self.utc_rollover_timer.timeout.connect(self.check_utc_day_rollover)
+        self.utc_rollover_timer.start(15000)
+
+        # Live UTC Clock Timer (updates every 1000ms)
+        self.utc_clock_timer = QTimer(self)
+        self.utc_clock_timer.timeout.connect(self.update_utc_clock)
+        self.utc_clock_timer.start(1000)
+
+        # Periodic Weather Refresh Timer (every 15 minutes)
+        self.weather_summary: Optional[WeatherForecastSummary] = None
+        self.weather_timer = QTimer(self)
+        self.weather_timer.timeout.connect(lambda: self.refresh_weather_display(force_refresh=True))
+        self.weather_timer.start(900000)  # 15 minutes
+
         self.init_ui()
+        self.update_utc_clock()
+        self.refresh_weather_display()
 
         # Explicitly initialize auto-refresh timer with saved combo interval
         self.on_refresh_interval_changed(self.combo_refresh.currentIndex())
@@ -1188,6 +1669,48 @@ class POTAHunterApp(QMainWindow):
         self.recompute_comparisons()
         self.fetch_spots()
 
+    def update_utc_clock(self):
+        """Updates live UTC clock displays in 'Time: HH:MM UTC' format."""
+        now_utc = datetime.now(timezone.utc)
+        clock_text = now_utc.strftime("Time: %H:%M UTC")
+        if hasattr(self, "lbl_utc_clock_top"):
+            self.lbl_utc_clock_top.setText(clock_text)
+        if hasattr(self, "lbl_utc_clock_bottom"):
+            self.lbl_utc_clock_bottom.setText(clock_text)
+
+    def get_worked_status(self, park_ref: str) -> Optional[str]:
+        """
+        Evaluates whether a park was worked today vs on a previous UTC day.
+        Returns:
+            "TODAY" - Worked today (current UTC day) -> [WORKED]
+            "PREVIOUS_DAY" - Worked on a previous UTC day (before 00Z) -> Hunted(W)
+            None - Not manually worked
+        """
+        if not park_ref:
+            return None
+        ref = normalize_ref(park_ref)
+        if not ref or ref not in self.manually_worked_parks:
+            return None
+
+        worked_date = str(self.manually_worked_parks.get(ref, "")).strip()
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        if worked_date == today_utc:
+            return "TODAY"
+        elif worked_date and worked_date < today_utc:
+            return "PREVIOUS_DAY"
+        else:
+            return "TODAY"
+
+    def check_utc_day_rollover(self):
+        """Monitors 00Z UTC day transitions while app is running, transitioning worked spots to Hunted(W)."""
+        current_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if hasattr(self, "_last_evaluated_utc_date") and self._last_evaluated_utc_date != current_utc:
+            self._last_evaluated_utc_date = current_utc
+            self.recompute_comparisons()
+        else:
+            self._last_evaluated_utc_date = current_utc
+
     def init_ui(self):
         self.setStyleSheet(DARK_STYLESHEET)
         self.create_menu_bar()
@@ -1196,6 +1719,16 @@ class POTAHunterApp(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
+
+        # Permanent live UTC clock on status bar
+        self.lbl_utc_clock_bottom = QLabel()
+        self.lbl_utc_clock_bottom.setStyleSheet(
+            "color: #79c0ff; font-family: 'Consolas', 'Courier New', monospace; "
+            "font-weight: bold; font-size: 13px; background-color: #161b22; "
+            "border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;"
+        )
+        self.lbl_utc_clock_bottom.setToolTip("Current Coordinated Universal Time (UTC)")
+        self.status_bar.addPermanentWidget(self.lbl_utc_clock_bottom)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -1264,21 +1797,27 @@ class POTAHunterApp(QMainWindow):
         reset_cols_action.triggered.connect(self.reset_column_widths)
         view_menu.addAction(reset_cols_action)
 
+        view_menu.addSeparator()
+
+        noise_matrix_action = QAction("Receiver Band &Noise Floor Matrix (ITU-R P.372)", self)
+        noise_matrix_action.setShortcut(QKeySequence("F6"))
+        noise_matrix_action.triggered.connect(self.show_band_noise_dialog)
+        view_menu.addAction(noise_matrix_action)
+
         # Help Menu
         help_menu = menu_bar.addMenu("&Help")
+
+        about_action = QAction("&About POTA Hunter", self)
+        about_action.setShortcut(QKeySequence("F1"))
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
 
         docs_action = QAction("&Documentation", self)
         docs_action.setShortcut(QKeySequence("F2"))
         docs_action.triggered.connect(self.show_docs_dialog)
         help_menu.addAction(docs_action)
 
-
         help_menu.addSeparator()
-
-        about_action = QAction("&About POTA Hunter", self)
-        about_action.setShortcut(QKeySequence("F1"))
-        about_action.triggered.connect(self.show_about_dialog)
-        help_menu.addAction(about_action)
 
         pota_web_action = QAction("Visit POTA.app Website", self)
         pota_web_action.triggered.connect(lambda: webbrowser.open("https://pota.app"))
@@ -1297,6 +1836,58 @@ class POTAHunterApp(QMainWindow):
         dlg = AboutDialog(self)
         dlg.exec()
 
+    def show_band_noise_dialog(self):
+        h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
+        if h_lat is None or h_lon is None:
+            h_lat, h_lon = 37.0, -95.0
+        dlg = BandNoiseDialog(
+            home_lat=h_lat,
+            home_lon=h_lon,
+            solar_weather=self.solar_weather,
+            lightning_summary=self.lightning_summary,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _format_noise_tooltip_html(self, matrix: List[BandNoiseBreakdown]) -> str:
+        lines = [
+            "<div style='font-family: sans-serif; font-size: 11px; color: #e6edf3;'>",
+            "<b style='color: #58a6ff; font-size: 12px;'>📡 Real-Time Receiver Noise Floor Matrix</b><br/>",
+            "<span style='color: #8b949e;'>ITU-R P.372 Diurnal Baseline &amp; Blitzortung QRN</span><br/><br/>",
+            "<table style='border-collapse: collapse; width: 100%; text-align: right;'>",
+            "<tr style='color: #8b949e; border-bottom: 1px solid #30363d; font-weight: bold;'>",
+            "<th style='text-align: left; padding: 2px 6px;'>Band</th>",
+            "<th style='padding: 2px 6px;'>Atmosphere</th>",
+            "<th style='padding: 2px 6px;'>Space</th>",
+            "<th style='padding: 2px 6px;'>Total Fa</th>",
+            "<th style='padding: 2px 6px;'>Est. S-Meter</th>",
+            "</tr>",
+        ]
+        for b in matrix:
+            if b.s_units_val >= 8.0:
+                s_col = "#f85149"
+            elif b.s_units_val >= 4.0:
+                s_col = "#ffa657"
+            elif b.s_units_val >= 2.0:
+                s_col = "#f1e05a"
+            else:
+                s_col = "#7ee787"
+
+            qrn_extra = f" (+{b.qrn_surge_db:.0f}dB)" if b.qrn_surge_db >= 1.0 else ""
+            lines.append(
+                f"<tr style='border-bottom: 1px solid #21262d;'>"
+                f"<td style='text-align: left; font-weight: bold; color: #58a6ff; padding: 2px 6px;'>{b.band}</td>"
+                f"<td style='color: #c9d1d9; padding: 2px 6px;'>{b.f_atm_total_db:.1f} dB{qrn_extra}</td>"
+                f"<td style='color: #bc8cff; padding: 2px 6px;'>{b.f_gal_db:.1f} dB</td>"
+                f"<td style='font-weight: bold; color: #e6edf3; padding: 2px 6px;'>{b.f_a_total_db:.1f} dB</td>"
+                f"<td style='font-weight: bold; color: {s_col}; padding: 2px 6px;'>{b.s_units_label}</td>"
+                f"</tr>"
+            )
+        lines.append("</table><br/>")
+        lines.append("<span style='color: #7ee787;'>💡 Click card to open full Noise Matrix window (or press F6)</span>")
+        lines.append("</div>")
+        return "".join(lines)
+
 
     def create_top_bar(self) -> QWidget:
 
@@ -1310,8 +1901,17 @@ class POTAHunterApp(QMainWindow):
         lbl_app.setStyleSheet("color: #f0f6fc; font-size: 16px; font-weight: bold;")
         layout.addWidget(lbl_app)
 
+        # Top Bar UTC Clock Badge
+        self.lbl_utc_clock_top = QLabel()
+        self.lbl_utc_clock_top.setStyleSheet(
+            "color: #79c0ff; font-family: 'Consolas', 'Courier New', monospace; "
+            "font-weight: bold; font-size: 13px; background-color: #161b22; "
+            "border: 1px solid #30363d; border-radius: 4px; padding: 3px 10px;"
+        )
+        self.lbl_utc_clock_top.setToolTip("Current Coordinated Universal Time (UTC)")
+        layout.addWidget(self.lbl_utc_clock_top)
 
-        layout.addSpacing(10)
+        layout.addSpacing(6)
 
         # Operator Callsign Input
         lbl_call = QLabel("My Call:")
@@ -1377,21 +1977,15 @@ class POTAHunterApp(QMainWindow):
 
         layout.addSpacing(6)
 
-        # CSV Selector
-        lbl_csv = QLabel("Hunter CSV:")
-        lbl_csv.setStyleSheet("color: #c9d1d9; font-weight: 600;")
-        layout.addWidget(lbl_csv)
-
-        self.txt_csv_path = QLineEdit(self.csv_path)
-        self.txt_csv_path.setPlaceholderText("Select hunter_parks.csv...")
-        self.txt_csv_path.setMinimumWidth(200)
-        layout.addWidget(self.txt_csv_path)
-
-        btn_browse = QPushButton("Browse...")
-        btn_browse.clicked.connect(self.browse_csv_file)
-        layout.addWidget(btn_browse)
+        # POTA Log File Selector (Button with active path hover tooltip)
+        self.txt_csv_path = QLineEdit(self.csv_path)  # Maintained for programmatic compatibility
+        self.btn_select_csv = QPushButton("Select POTA Log")
+        self.btn_select_csv.setToolTip(f"Active Log: {self.csv_path}" if self.csv_path else "Click to select hunter_parks.csv log file")
+        self.btn_select_csv.clicked.connect(self.browse_csv_file)
+        layout.addWidget(self.btn_select_csv)
 
         btn_reload_csv = QPushButton("Reload Log")
+        btn_reload_csv.setToolTip("Reload active hunter log from disk")
         btn_reload_csv.clicked.connect(self.reload_csv)
         layout.addWidget(btn_reload_csv)
 
@@ -1436,14 +2030,19 @@ class POTAHunterApp(QMainWindow):
         self.card_solar = StatCard("Space Weather", "SFI: -- | A: -- | K: -- | Flare: --", "#388bfd")
         self.card_solar.setToolTip(self.solar_weather.format_tooltip_html())
         self.card_lightning = StatCard("Lightning", "1", "#2ea043")
+        self.card_noise = StatCard("Band Noise", "40m: S0 | 20m: S0", "#58a6ff", is_clickable=True)
+        self.card_noise.clicked.connect(self.show_band_noise_dialog)
+        self.card_weather = StatCard("Local Weather", "--°F", "#58a6ff")
 
         layout.addWidget(self.card_new, stretch=2)
         layout.addWidget(self.card_hunted, stretch=2)
         layout.addWidget(self.card_active, stretch=2)
         layout.addWidget(self.card_unique_parks, stretch=2)
         layout.addWidget(self.card_total_hunted, stretch=2)
-        layout.addWidget(self.card_solar, stretch=5)
+        layout.addWidget(self.card_solar, stretch=4)
         layout.addWidget(self.card_lightning, stretch=2)
+        layout.addWidget(self.card_noise, stretch=2)
+        layout.addWidget(self.card_weather, stretch=3)
 
         return panel
 
@@ -1694,7 +2293,10 @@ class POTAHunterApp(QMainWindow):
         return panel
 
     def load_initial_csv(self):
-        self.csv_path = self.txt_csv_path.text().strip()
+        if hasattr(self, "txt_csv_path") and self.txt_csv_path.text().strip():
+            self.csv_path = self.txt_csv_path.text().strip()
+        if hasattr(self, "btn_select_csv"):
+            self.btn_select_csv.setToolTip(f"Active Log: {self.csv_path}" if self.csv_path else "Click to select hunter_parks.csv log file")
         if os.path.exists(self.csv_path):
             self.hunted_parks = load_hunter_csv(self.csv_path)
             total_hunted = len(self.hunted_parks)
@@ -1715,7 +2317,7 @@ class POTAHunterApp(QMainWindow):
         else:
             self.card_total_hunted.set_value("0")
             self.status_bar.showMessage(
-                f"CSV not found at {self.csv_path}. Please browse and select your hunter export."
+                f"CSV not found at {self.csv_path}. Please click 'Select POTA Log' to choose your hunter export."
             )
             # Display interactive alert popup with download guidance if not in headless test mode
             if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
@@ -1747,17 +2349,17 @@ class POTAHunterApp(QMainWindow):
             "2. Navigate to <b>Profile</b> &rarr; <b>My Stats</b><br>"
             "3. Scroll down to the <b>Hunted Parks</b> table<br>"
             "4. Click <b>Export CSV</b> to download your fresh <code>hunter_parks.csv</code><br>"
-            "5. Save the file and click <b>Browse CSV File...</b> (or replace your existing file)."
+            "5. Save the file and click <b>Select POTA Log...</b> (or replace your existing file)."
         )
         btn_open_web = msg_box.addButton("Open POTA.app", QMessageBox.ButtonRole.ActionRole)
-        btn_browse_file = msg_box.addButton("Browse CSV File...", QMessageBox.ButtonRole.ActionRole)
+        btn_select_file = msg_box.addButton("Select POTA Log...", QMessageBox.ButtonRole.ActionRole)
         btn_continue = msg_box.addButton("Continue with Current Log", QMessageBox.ButtonRole.AcceptRole)
 
         msg_box.exec()
 
         if msg_box.clickedButton() == btn_open_web:
             webbrowser.open("https://pota.app/#/user/stats")
-        elif msg_box.clickedButton() == btn_browse_file:
+        elif msg_box.clickedButton() == btn_select_file:
             self.browse_csv_file()
 
     def show_missing_csv_dialog(self):
@@ -1772,11 +2374,11 @@ class POTAHunterApp(QMainWindow):
             "2. Navigate to <b>Profile</b> &rarr; <b>My Stats</b><br>"
             "3. Scroll down to the <b>Hunted Parks</b> table<br>"
             "4. Click <b>Export CSV</b> to download your <code>hunter_parks.csv</code><br>"
-            "5. Save the file and click <b>Browse CSV File...</b> to select it."
+            "5. Save the file and click <b>Select POTA Log...</b> to choose it."
         )
         btn_open_web = msg_box.addButton("Open POTA.app", QMessageBox.ButtonRole.ActionRole)
 
-        btn_browse_file = msg_box.addButton("Browse CSV File...", QMessageBox.ButtonRole.ActionRole)
+        btn_select_file = msg_box.addButton("Select POTA Log...", QMessageBox.ButtonRole.ActionRole)
 
         btn_continue = msg_box.addButton("Continue (All Spots = NEW)", QMessageBox.ButtonRole.AcceptRole)
 
@@ -1784,7 +2386,7 @@ class POTAHunterApp(QMainWindow):
 
         if msg_box.clickedButton() == btn_open_web:
             webbrowser.open("https://pota.app/#/user/stats")
-        elif msg_box.clickedButton() == btn_browse_file:
+        elif msg_box.clickedButton() == btn_select_file:
             self.browse_csv_file()
 
     def browse_csv_file(self):
@@ -1796,11 +2398,18 @@ class POTAHunterApp(QMainWindow):
             "CSV Files (*.csv);;All Files (*)",
         )
         if file_path:
-            self.txt_csv_path.setText(file_path)
+            self.csv_path = file_path
+            if hasattr(self, "txt_csv_path"):
+                self.txt_csv_path.setText(file_path)
+            if hasattr(self, "btn_select_csv"):
+                self.btn_select_csv.setToolTip(f"Active Log: {self.csv_path}")
             self.reload_csv()
 
     def reload_csv(self):
-        self.csv_path = self.txt_csv_path.text().strip()
+        if hasattr(self, "txt_csv_path") and self.txt_csv_path.text().strip():
+            self.csv_path = self.txt_csv_path.text().strip()
+        if hasattr(self, "btn_select_csv"):
+            self.btn_select_csv.setToolTip(f"Active Log: {self.csv_path}" if self.csv_path else "Click to select hunter_parks.csv log file")
         if not os.path.exists(self.csv_path):
             QMessageBox.warning(
                 self,
@@ -1831,18 +2440,20 @@ class POTAHunterApp(QMainWindow):
         resolver = CallsignResolver()
         loc = resolver.lookup_user_callsign(call)
         if loc and loc.grid:
-            self.home_grid = loc.grid
-            settings.setValue("home_grid", loc.grid)
+            clean_grid = loc.grid.strip().upper()
+            self.home_grid = clean_grid
+            settings.setValue("home_grid", clean_grid)
             if not self.p2p_mode:
-                self.current_grid = loc.grid
-                self.txt_grid.setText(loc.grid)
-                h_lat, h_lon = maidenhead_to_latlon(loc.grid)
+                self.current_grid = clean_grid
+                self.txt_grid.setText(clean_grid)
+                h_lat, h_lon = maidenhead_to_latlon(clean_grid)
                 if h_lat is not None and h_lon is not None:
                     self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
                 self.recompute_comparisons()
+                self.refresh_weather_display(force_refresh=True)
             name_str = f" ({loc.name})" if loc.name else ""
             self.status_bar.showMessage(
-                f"Callsign {call} found -> Home Grid set to {loc.grid}{name_str}"
+                f"Callsign {call} found -> Home Grid set to {clean_grid}{name_str}"
             )
         else:
             self.status_bar.showMessage(f"Looking up license/location for callsign {call}...")
@@ -1854,7 +2465,7 @@ class POTAHunterApp(QMainWindow):
     def on_callsign_lookup_finished(self, loc):
         if not loc or not getattr(loc, "grid", None):
             return
-        if self.my_call == loc.callsign:
+        if self.my_call.strip().upper() == loc.callsign.strip().upper():
             clean_grid = loc.grid.strip().upper()
             self.home_grid = clean_grid
             settings = QSettings("POTA", "HunterComparator")
@@ -1866,6 +2477,7 @@ class POTAHunterApp(QMainWindow):
                 if h_lat is not None and h_lon is not None:
                     self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
                 self.recompute_comparisons()
+                self.refresh_weather_display(force_refresh=True)
             name_str = f" ({loc.name})" if loc.name else ""
             self.status_bar.showMessage(
                 f"Callsign {loc.callsign} verified -> Home Grid set to {clean_grid}{name_str}"
@@ -1885,6 +2497,7 @@ class POTAHunterApp(QMainWindow):
         if h_lat is not None and h_lon is not None:
             self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
         self.recompute_comparisons()
+        self.refresh_weather_display(force_refresh=True)
         self.status_bar.showMessage(
             f"Operating Grid set to {grid} | Recalculated all distances, bearings & propagation"
         )
@@ -1934,6 +2547,7 @@ class POTAHunterApp(QMainWindow):
         if home_lat is None or home_lon is None:
             home_lat, home_lon = 38.3125, -81.7083
 
+        self.refresh_weather_display(force_refresh=False)
         worker = FetchSpotsWorker(home_lat, home_lon)
         worker.signals.finished.connect(self.on_spots_fetched)
         worker.signals.error.connect(self.on_spots_error)
@@ -1968,6 +2582,108 @@ class POTAHunterApp(QMainWindow):
         self.btn_fetch.setText("Fetch Spots")
         self.status_bar.showMessage(f"Fetch Error: {err_msg}")
 
+    def _on_startup_lightning_tick(self):
+        """
+        Adaptive startup lightning refresh handler:
+        - Updates lightning telemetry every 5s for the first 30s
+        - Updates lightning telemetry every 10s for the next 30s (seconds 30 to 60)
+        - Stops after 60s, smoothly transitioning to the standard user-configured auto-refresh interval.
+        """
+        elapsed = time.time() - self.startup_lightning_start_time
+        if elapsed < 30.0:
+            if self.startup_lightning_timer.interval() != 5000:
+                self.startup_lightning_timer.setInterval(5000)
+            self.refresh_lightning_display()
+        elif elapsed < 60.0:
+            if self.startup_lightning_timer.interval() != 10000:
+                self.startup_lightning_timer.setInterval(10000)
+            self.refresh_lightning_display()
+        else:
+            self.startup_lightning_timer.stop()
+            self.refresh_lightning_display()
+
+    def refresh_lightning_display(self):
+        """
+        Lightweight real-time refresh of regional lightning activity,
+        threat level card badge, mouseover tooltip, and band noise floor cards.
+        """
+        home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
+        if home_lat is None or home_lon is None:
+            home_lat, home_lon = 38.3125, -81.7083
+
+        self.lightning_summary = fetch_regional_lightning_summary(home_lat, home_lon, force_refresh=True)
+
+        # Update Lightning Card & Tooltip
+        act = self.lightning_summary.get_activity_level()
+        self.card_lightning.set_value(str(act.level))
+        self.card_lightning.set_accent_color(act.color)
+        self.card_lightning.setToolTip(self.lightning_summary.format_tooltip_html())
+
+        # Update Band Noise Floor Card & Tooltip
+        noise_matrix = compute_band_noise_matrix(
+            home_lat,
+            home_lon,
+            solar_weather=self.solar_weather,
+            lightning_summary=self.lightning_summary,
+        )
+        s_40 = next((b.s_units_label for b in noise_matrix if b.band == "40m"), "S0")
+        s_20 = next((b.s_units_label for b in noise_matrix if b.band == "20m"), "S0")
+        s_40_short = s_40.split()[0]
+        s_20_short = s_20.split()[0]
+        self.card_noise.set_value(f"40m:{s_40_short} | 20m:{s_20_short}")
+
+        if any(b.s_units_val >= 7.0 for b in noise_matrix):
+            self.card_noise.set_accent_color("#f85149")
+        elif any(b.is_elevated_qrn for b in noise_matrix):
+            self.card_noise.set_accent_color("#ffa657")
+        else:
+            self.card_noise.set_accent_color("#58a6ff")
+
+        self.card_noise.setToolTip(self._format_noise_tooltip_html(noise_matrix))
+
+        # If spots are loaded, recalculate spot scores with updated lightning QRN surge
+        if self.active_spots:
+            self.recompute_comparisons()
+
+    def refresh_weather_display(self, force_refresh: bool = False):
+        """Asynchronously fetches local weather summary from Open-Meteo and updates UI."""
+        home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
+        if home_lat is None or home_lon is None:
+            home_lat, home_lon = 38.3125, -81.7083
+
+        loc_name = None
+        if self.p2p_mode and self.p2p_my_park:
+            p_name = getattr(self, "p2p_my_park_name", "")
+            loc_name = f"{p_name} ({self.p2p_my_park})" if p_name else f"Park {self.p2p_my_park}"
+        elif self.current_grid:
+            loc_name = f"Home QTH ({self.current_grid})"
+
+        worker = FetchWeatherWorker(home_lat, home_lon, location_name=loc_name, force_refresh=force_refresh)
+        worker.signals.finished.connect(self._on_weather_fetched)
+        self.threadpool.start(worker)
+
+    def _on_weather_fetched(self, summary: WeatherForecastSummary):
+        """Updates the Local Weather stat card value and tooltip HTML upon worker completion."""
+        self.weather_summary = summary
+        if summary and summary.current:
+            val_str = f"{int(round(summary.current.temp_f))}°F {summary.current.weather_icon} {summary.current.short_label}"
+            self.card_weather.set_value(val_str)
+            if "Sun" in summary.current.short_label or "Clear" in summary.current.short_label:
+                self.card_weather.set_accent_color("#e3b341")
+            elif "Rain" in summary.current.short_label or "Storm" in summary.current.short_label or "Showers" in summary.current.short_label:
+                self.card_weather.set_accent_color("#f85149")
+            else:
+                self.card_weather.set_accent_color("#58a6ff")
+        elif summary and summary.error_message:
+            self.card_weather.set_value("Error")
+            self.card_weather.set_accent_color("#f85149")
+        else:
+            self.card_weather.set_value("--°F")
+            self.card_weather.set_accent_color("#8b949e")
+
+        if summary:
+            self.card_weather.setToolTip(summary.format_tooltip_html())
+
     def update_p2p_ui_visibility(self):
         enabled = self.chk_p2p.isChecked()
         self.lbl_p2p_park.setVisible(enabled)
@@ -1995,6 +2711,7 @@ class POTAHunterApp(QMainWindow):
                 f"P2P Mode disabled -> Grid reverted to home QTH {self.home_grid}"
             )
             self.recompute_comparisons()
+            self.refresh_weather_display(force_refresh=True)
 
     def on_p2p_park_changed(self):
         raw_park = self.txt_p2p_park.text().strip()
@@ -2009,6 +2726,7 @@ class POTAHunterApp(QMainWindow):
             if h_lat is not None and h_lon is not None:
                 self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
             self.recompute_comparisons()
+            self.refresh_weather_display(force_refresh=True)
             return
 
         norm_ref = normalize_ref(raw_park)
@@ -2028,11 +2746,18 @@ class POTAHunterApp(QMainWindow):
             if h_lat is not None and h_lon is not None:
                 self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
             park_name = info.get("name", "")
+            self.p2p_my_park_name = park_name
             name_str = f" ({park_name})" if park_name else ""
+            if park_name:
+                self.txt_p2p_park.setToolTip(f"{norm_ref} - {park_name} [Grid: {grid}]")
+                self.lbl_p2p_park.setToolTip(f"Field Park: {norm_ref} - {park_name}")
+            else:
+                self.txt_p2p_park.setToolTip(f"Your field park reference: {norm_ref}")
             self.status_bar.showMessage(
                 f"Park {norm_ref}{name_str} -> Grid set to {grid} | Recalculated P2P path & propagation"
             )
             self.recompute_comparisons()
+            self.refresh_weather_display(force_refresh=True)
         else:
             # 2. Asynchronous API fetch
             self.status_bar.showMessage(f"Looking up location and Maidenhead grid for {norm_ref}...")
@@ -2056,11 +2781,18 @@ class POTAHunterApp(QMainWindow):
                 if h_lat is not None and h_lon is not None:
                     self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
                 park_name = info.get("name", "")
+                self.p2p_my_park_name = park_name
                 name_str = f" ({park_name})" if park_name else ""
+                if park_name:
+                    self.txt_p2p_park.setToolTip(f"{ref} - {park_name} [Grid: {grid}]")
+                    self.lbl_p2p_park.setToolTip(f"Field Park: {ref} - {park_name}")
+                else:
+                    self.txt_p2p_park.setToolTip(f"Your field park reference: {ref}")
                 self.status_bar.showMessage(
                     f"Park {ref}{name_str} -> Grid set to {grid} | Recalculated P2P path & propagation"
                 )
                 self.recompute_comparisons()
+                self.refresh_weather_display(force_refresh=True)
 
     def on_station_config_changed(self):
         pwr_data = self.combo_power.currentData()
@@ -2095,8 +2827,8 @@ class POTAHunterApp(QMainWindow):
         )
 
         # Update stats
-        new_count = sum(1 for c in self.compared_spots if c.is_new and c.spot.reference not in self.manually_worked_parks)
-        hunted_count = sum(1 for c in self.compared_spots if not c.is_new or c.spot.reference in self.manually_worked_parks)
+        new_count = sum(1 for c in self.compared_spots if c.is_new and self.get_worked_status(c.spot.reference) is None)
+        hunted_count = sum(1 for c in self.compared_spots if not c.is_new or self.get_worked_status(c.spot.reference) is not None)
         unique_active_parks = len(set(c.spot.reference for c in self.compared_spots if c.spot.reference))
 
         if self.p2p_mode and self.p2p_my_park:
@@ -2132,6 +2864,31 @@ class POTAHunterApp(QMainWindow):
         self.card_lightning.set_value(str(act.level))
         self.card_lightning.set_accent_color(act.color)
         self.card_lightning.setToolTip(self.lightning_summary.format_tooltip_html())
+
+        # Update Band Noise Floor card
+        h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
+        if h_lat is not None and h_lon is not None:
+            noise_matrix = compute_band_noise_matrix(
+                h_lat,
+                h_lon,
+                solar_weather=self.solar_weather,
+                lightning_summary=self.lightning_summary,
+            )
+            s_40 = next((b.s_units_label for b in noise_matrix if b.band == "40m"), "S0")
+            s_20 = next((b.s_units_label for b in noise_matrix if b.band == "20m"), "S0")
+            s_40_short = s_40.split()[0]
+            s_20_short = s_20.split()[0]
+            self.card_noise.set_value(f"40m:{s_40_short} | 20m:{s_20_short}")
+
+            # Accent color: Red if high noise, Orange if elevated QRN, Blue if normal
+            if any(b.s_units_val >= 7.0 for b in noise_matrix):
+                self.card_noise.set_accent_color("#f85149")
+            elif any(b.is_elevated_qrn for b in noise_matrix):
+                self.card_noise.set_accent_color("#ffa657")
+            else:
+                self.card_noise.set_accent_color("#58a6ff")
+
+            self.card_noise.setToolTip(self._format_noise_tooltip_html(noise_matrix))
 
         # Update dynamic mode filter list if new modes appeared
         current_mode = self.combo_mode.currentText()
@@ -2181,14 +2938,18 @@ class POTAHunterApp(QMainWindow):
 
         filtered: List[ComparedSpot] = []
         for cs in self.compared_spots:
-            is_worked = cs.spot.reference in self.manually_worked_parks
+            worked_st = self.get_worked_status(cs.spot.reference)
+            is_worked_today = (worked_st == "TODAY")
+            is_worked_prev = (worked_st == "PREVIOUS_DAY")
+            is_ever_worked = is_worked_today or is_worked_prev
+            is_effectively_new = cs.is_new and not is_ever_worked
 
-            # 1. Status filter: 0=All, 1=New, 2=Hunted/Worked, 3=[WORKED] Only, 4=P2P
-            if status_filter == 1 and (not cs.is_new or is_worked):
+            # 1. Status filter: 0=All, 1=New, 2=Hunted/Worked, 3=[WORKED] Today Only, 4=P2P
+            if status_filter == 1 and not is_effectively_new:
                 continue
-            if status_filter == 2 and (cs.is_new and not is_worked):
+            if status_filter == 2 and is_effectively_new:
                 continue
-            if status_filter == 3 and not is_worked:
+            if status_filter == 3 and not is_worked_today:
                 continue
             if status_filter == 4 and not cs.is_p2p_eligible:
                 continue
@@ -2389,13 +3150,28 @@ class POTAHunterApp(QMainWindow):
             # Precompute row tooltip based on toggle state
             row_tooltip = self.build_row_tooltip(cs) if self.show_tooltips else ""
 
-            # 0: Status Badge & Dropdown Selector (with [WORKED] & P2P support)
-            is_worked = cs.spot.reference in self.manually_worked_parks
+            # 0: Status Badge & Dropdown Selector (with [WORKED], Hunted(W), & P2P support)
+            worked_status = self.get_worked_status(cs.spot.reference)
+            is_worked_today = (worked_status == "TODAY")
+            is_worked_prev = (worked_status == "PREVIOUS_DAY")
 
-            if is_worked:
+            if is_worked_today:
                 raw_auto_label = "[WORKED]"
                 item_status = NumericTableWidgetItem("[WORKED]", 2.0)
                 item_status.setForeground(QBrush(QColor("#3fb950")))
+                item_status.setFont(QFont("", -1, QFont.Weight.Bold))
+            elif is_worked_prev:
+                if cs.is_p2p_eligible:
+                    raw_auto_label = "[P2P] Hunted(W)"
+                    item_status = NumericTableWidgetItem("[P2P] Hunted(W)", 0.6)
+                    item_status.setForeground(QBrush(QColor("#d2a8ff")))
+                else:
+                    if cs.qsos_hunted > 0:
+                        raw_auto_label = f"Hunted(W) ({cs.qsos_hunted})"
+                    else:
+                        raw_auto_label = "Hunted(W)"
+                    item_status = NumericTableWidgetItem(raw_auto_label, 0.4)
+                    item_status.setForeground(QBrush(QColor("#7ee787")))
                 item_status.setFont(QFont("", -1, QFont.Weight.Bold))
             elif cs.is_p2p_eligible:
                 if cs.is_new:
@@ -2548,14 +3324,29 @@ class POTAHunterApp(QMainWindow):
             # Add drop-down selector widget in Status column cell
             combo_status = QComboBox()
             combo_status.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            if is_worked:
+            if is_worked_today:
                 combo_status.addItem("[WORKED]")
-                combo_status.addItem(f"Auto ({raw_auto_label})")
+                combo_status.addItem("Mark as Unworked")
                 combo_status.setCurrentIndex(0)
                 combo_status.setStyleSheet(
                     "QComboBox { background-color: #1b4b27; color: #3fb950; border: 1px solid #2ea043; font-weight: bold; border-radius: 4px; padding: 1px 4px; }"
                     "QComboBox::drop-down { border: none; }"
                 )
+            elif is_worked_prev:
+                combo_status.addItem(raw_auto_label)
+                combo_status.addItem("Mark [WORKED] Today")
+                combo_status.addItem("Clear Worked History")
+                combo_status.setCurrentIndex(0)
+                if cs.is_p2p_eligible:
+                    combo_status.setStyleSheet(
+                        "QComboBox { background-color: #2b1b3d; color: #d2a8ff; border: 1px solid #8957e5; font-weight: bold; border-radius: 4px; padding: 1px 4px; }"
+                        "QComboBox::drop-down { border: none; }"
+                    )
+                else:
+                    combo_status.setStyleSheet(
+                        "QComboBox { background-color: #16231a; color: #7ee787; border: 1px solid #238636; font-weight: bold; border-radius: 4px; padding: 1px 4px; }"
+                        "QComboBox::drop-down { border: none; }"
+                    )
             else:
                 combo_status.addItem(raw_auto_label)
                 combo_status.addItem("Mark [WORKED]")
@@ -2573,13 +3364,20 @@ class POTAHunterApp(QMainWindow):
 
             target_ref = cs.spot.reference
             target_call = cs.spot.activator
-            was_worked = is_worked
+            curr_w_status = worked_status
 
-            def on_cell_status_changed(index: int, ref=target_ref, call=target_call, is_w=was_worked):
-                if is_w and index == 1:
-                    self.toggle_park_worked(ref, force_state=False)
-                elif not is_w and index == 1:
-                    self.toggle_park_worked(ref, force_state=True, activator_call=call)
+            def on_cell_status_changed(index: int, ref=target_ref, call=target_call, w_stat=curr_w_status):
+                if w_stat == "TODAY":
+                    if index == 1:
+                        self.toggle_park_worked(ref, force_state=False)
+                elif w_stat == "PREVIOUS_DAY":
+                    if index == 1:
+                        self.toggle_park_worked(ref, force_state=True, activator_call=call)
+                    elif index == 2:
+                        self.toggle_park_worked(ref, force_state=False)
+                else:
+                    if index == 1:
+                        self.toggle_park_worked(ref, force_state=True, activator_call=call)
 
             combo_status.currentIndexChanged.connect(on_cell_status_changed)
             self.table.setCellWidget(row, 0, combo_status)
@@ -2695,21 +3493,23 @@ class POTAHunterApp(QMainWindow):
         ref = normalize_ref(park_ref)
         if not ref:
             return
+        today_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         is_now_worked = False
         if force_state is True:
-            self.manually_worked_parks.add(ref)
+            self.manually_worked_parks.add(ref, today_utc_str)
             is_now_worked = True
         elif force_state is False:
             self.manually_worked_parks.discard(ref)
         else:
-            if ref in self.manually_worked_parks:
+            w_stat = self.get_worked_status(ref)
+            if w_stat == "TODAY":
                 self.manually_worked_parks.discard(ref)
             else:
-                self.manually_worked_parks.add(ref)
+                self.manually_worked_parks.add(ref, today_utc_str)
                 is_now_worked = True
 
         settings = QSettings("POTA", "HunterComparator")
-        settings.setValue("manually_worked_parks", list(self.manually_worked_parks))
+        settings.setValue("manually_worked_parks", dict(self.manually_worked_parks))
         self.recompute_comparisons()
 
         if is_now_worked:
@@ -2732,18 +3532,24 @@ class POTAHunterApp(QMainWindow):
                 self.btn_mark_worked.setText("Mark [WORKED]")
             return
 
+        worked_st = self.get_worked_status(cs.spot.reference)
         if hasattr(self, "btn_mark_worked"):
             self.btn_mark_worked.setEnabled(True)
-            if cs.spot.reference in self.manually_worked_parks:
+            if worked_st == "TODAY":
                 self.btn_mark_worked.setText("Unmark [WORKED]")
+            elif worked_st == "PREVIOUS_DAY":
+                self.btn_mark_worked.setText("Mark [WORKED] (Today)")
             else:
                 self.btn_mark_worked.setText("Mark [WORKED]")
 
-        status_text = (
-            "UNHUNTED PARK"
-            if cs.is_new
-            else f"HUNTED ({cs.qsos_hunted} QSOs, First: {cs.hunted_park.first_qso_date if cs.hunted_park else 'N/A'})"
-        )
+        if worked_st == "TODAY":
+            status_text = "[WORKED TODAY]"
+        elif worked_st == "PREVIOUS_DAY":
+            status_text = "HUNTED(W) (Worked Previous UTC Day • Eligible to Hunt Again Today!)"
+        elif cs.is_new:
+            status_text = "UNHUNTED PARK"
+        else:
+            status_text = f"HUNTED ({cs.qsos_hunted} QSOs, First: {cs.hunted_park.first_qso_date if cs.hunted_park else 'N/A'})"
         coords = (
             f"{cs.spot.latitude:.4f}, {cs.spot.longitude:.4f}"
             if (cs.spot.latitude and cs.spot.longitude)
@@ -2814,11 +3620,16 @@ class POTAHunterApp(QMainWindow):
         act_intel.triggered.connect(self.open_selected_spot_intel)
         menu.addAction(act_intel)
 
-        if cs.spot.reference in self.manually_worked_parks:
+        worked_st = self.get_worked_status(cs.spot.reference)
+        if worked_st == "TODAY":
             act_worked = QAction(f"Unmark [WORKED] Status for Park {cs.spot.reference}", self)
+            act_worked.triggered.connect(lambda: self.toggle_park_worked(cs.spot.reference, force_state=False))
+        elif worked_st == "PREVIOUS_DAY":
+            act_worked = QAction(f"Mark Park {cs.spot.reference} as [WORKED] Today (New UTC Day)", self)
+            act_worked.triggered.connect(lambda: self.toggle_park_worked(cs.spot.reference, force_state=True, activator_call=cs.spot.activator))
         else:
             act_worked = QAction(f"Mark Park {cs.spot.reference} as [WORKED]", self)
-        act_worked.triggered.connect(lambda: self.toggle_park_worked(cs.spot.reference))
+            act_worked.triggered.connect(lambda: self.toggle_park_worked(cs.spot.reference, force_state=True, activator_call=cs.spot.activator))
         menu.addAction(act_worked)
 
         menu.addSeparator()
@@ -2942,6 +3753,12 @@ class POTAHunterApp(QMainWindow):
     def closeEvent(self, event):
         # Stop background timers and worker tasks
         self.refresh_timer.stop()
+        if hasattr(self, "startup_lightning_timer") and self.startup_lightning_timer.isActive():
+            self.startup_lightning_timer.stop()
+        if hasattr(self, "utc_clock_timer") and self.utc_clock_timer.isActive():
+            self.utc_clock_timer.stop()
+        if hasattr(self, "utc_rollover_timer") and self.utc_rollover_timer.isActive():
+            self.utc_rollover_timer.stop()
         for w in list(self._active_workers):
             if hasattr(w, "signals"):
                 try:
@@ -2979,13 +3796,14 @@ class POTAHunterApp(QMainWindow):
         settings.setValue("filter_band", self.combo_band.currentText())
         settings.setValue("filter_mode", self.combo_mode.currentText())
         settings.setValue("refresh_interval_idx", self.combo_refresh.currentIndex())
-        settings.setValue("manually_worked_parks", list(self.manually_worked_parks))
+        settings.setValue("manually_worked_parks", dict(self.manually_worked_parks))
         super().closeEvent(event)
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("POTA Hunter")
+    app.setStyleSheet(DARK_STYLESHEET)
     window = POTAHunterApp()
     window.show()
     sys.exit(app.exec())

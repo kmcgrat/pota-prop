@@ -18,11 +18,15 @@ AppDir/
 *.AppImage
 *.spec.bak
 
+# Build Tools (large platform-specific binaries — re-download as needed)
+build_tools/
+
 # IDE & Editor Settings
 .vscode/
 .idea/
 *.swp
 *.swo
+POTA.code-workspace
 
 # User Logs and Exports
 *.log
@@ -32,3 +36,9 @@ exported_spots*.csv
 # OS generated
 .DS_Store
 Thumbs.db
+
+# Local Notes & TODOs
+TODO*
+
+# Park cache (auto-generated at runtime)
+.pota_park_cache.json

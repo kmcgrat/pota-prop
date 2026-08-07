@@ -13,7 +13,9 @@ It compares your historical hunted parks export against live active spots on [po
   - **Multi-Layer Ionospheric Profile (E, F1, F2)**: Computes Chapman solar-zenith electron density for E/F1 layers and diurnal variation for the F2 layer ($foE, hmE, foF1, hmF1, foF2, hmF2, ymF2$).
   - **Multi-Hop Ray Tracing ($1E, 2E, 1F2, 2F2, 3F2, 4F2$)**: Calculates takeoff launch elevation angles ($\Delta$) and ionospheric incidence angles ($\phi_{\text{inc}}$) across Great-Circle paths to identify the dominant ray path mode.
   - **Skip-Zone Calculations**: Evaluates oblique critical frequency ($f \le foF2 \sec \phi_{\text{inc}}$). If an operating frequency exceeds the oblique MUF on short skip or nighttime paths, the path is flagged as closed.
-  - **Regional Lightning & QRN Atmospheric Noise Engine**: Connects to the **Blitzortung.org** community lightning detection network via a background streaming WebSocket. Buffers strikes across a 60-minute sliding window with time-decay weighting, tracks spatial storm clusters, and calculates frequency-dependent noise surges ($\Delta F_{\text{QRN}}$) factored into the ITU-R P.372 atmospheric noise floor.
+  - **Regional Lightning & Convective Threat Engine**: Hybrid architecture combining instant **NOAA NWS Convective Alerts** (Severe Thunderstorm, Tornado, Marine, Flash Flood warnings with product expiration countdowns) with real-time **Blitzortung.org** live WebSocket stroke telemetry across a 750-mile radius. Features **Storm Cell Trajectory Tracking** deriving ground speed (mph), cardinal movement direction, and **Time of Arrival (TOA in minutes)** estimates for approaching storms. Features a 1-to-10 threat scale, station safety advisories (Level 9/10 feedline disconnect alerts), and frequency-dependent noise surge ($\Delta F_{\text{QRN}}$) modeling.
+  - **Open-Meteo Local Weather & 12-Hour Hourly Forecast**: Top dashboard card displaying current temperature and weather condition icon (`72°F ⛅`). Mouseover popup opens a 12-hour hourly forecast table with **Time (UTC)** in 24-hour format, temperature (°F), weather condition icons/descriptions, wind vectors, and Open-Meteo attribution.
+  - **Receiver Band Noise Floor Matrix (ITU-R P.372-16)**: Full 11-band noise floor engine (160m to 6m) modeling diurnal day/night atmospheric noise curves, cosmic/galactic background, man-made baselines, and live Blitzortung lightning QRN surges with standard IARU S-meter calibration ($S9 = -73\text{ dBm}$, $6\text{ dB/S-unit}$). Accessible via top dashboard stat card or **F6** hotkey.
   - **Station Link Budget & SNR Estimation**: Incorporates transmitter power (Watts to dBW), antenna radiation patterns (Dipole, End-Fed, Vertical, Loop, Random Wire, 3-Element Beam), free-space path loss ($L_{\text{bf}}$), ionospheric absorption ($L_a$) with geomagnetic gyrofrequency ($f_H = 1.4\text{ MHz}$), and ground reflection losses ($L_g$).
   - **Live Space Weather**: Background worker pulls 10.7cm Solar Flux Index (SFI), planetary K-index, planetary A-index, and GOES Satellite 0.1–0.8nm X-ray flux (solar flare monitoring R1–R5) from NOAA SWPC.
   - **Automated QRT Detection & Real-Time Decodes**: Adjusts QSO Score when spot comments indicate an activator is QRT (off the air), and adds score adjustments (+15) for PSKReporter and WSPR live decodes.
@@ -25,7 +27,7 @@ It compares your historical hunted parks export against live active spots on [po
   - **Band Filter**: Filter by 160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m, 6m, 2m, 70cm, etc.
   - **Mode Filter**: Filter by CW, SSB, FT8, FT4, FM, AM, Digital, etc.
   - **Instant Search**: Real-time search across Park ID, Park Name, Activator Callsign, Location/State, Grid, or Spotter Comments.
-- **Summary Metric Cards**: Live counters for Unhunted Spots, Hunted Spots, Total Spots, Unique Active Parks, Total Parks in Log, and Live NOAA Space Weather (SFI / K-Index).
+- **Summary Metric Cards**: Live counters for Unhunted Spots, Hunted Spots, Total Spots, Unique Active Parks, Total Parks in Log, Live NOAA Space Weather (SFI / K-Index), Regional Lightning Activity (1–10 Threat Scale), and Receiver Band Noise Floor (S-units).
 - **Interactive Table & Resizable Columns**:
   - **13 Detailed Columns**: Status, `Score`, Activator, Frequency, Time, Park ID, Park Name, Location/State, Band, Mode, Distance & Bearing, Grid, Comments.
   - **Local Verification (`+` Symbol)**: Scores featuring a `+` (e.g. `85+`) indicate local spotter verification confirming nearby spotters in your region hear the signal.
@@ -49,7 +51,8 @@ It compares your historical hunted parks export against live active spots on [po
 1. **Export Your Hunted Log from pota.app**:
    - Open [pota.app](https://pota.app) in your web browser and sign in.
    - Navigate to **Profile** -> **My Stats**, scroll down to the **Hunted Parks** table, and click **Export CSV** to download `hunter_parks.csv`.
-   - **Browser Warning**: Web browsers automatically append `(1)` or `(2)` if an old `hunter_parks.csv` exists in your `Downloads` folder (e.g., `hunter_parks (1).csv`). Always delete your old `hunter_parks.csv` before downloading a new export, or use **Browse CSV File** in POTA Hunter to select the exact file!
+   - **Browser Warning**: Web browsers automatically append `(1)` or `(2)` if an old `hunter_parks.csv` exists in your `Downloads` folder (e.g., `hunter_parks (1).csv`). Always delete your old `hunter_parks.csv` before downloading a new export, or use **Select POTA Log** in POTA Hunter to choose the exact file.
+   - **Load Into POTA Hunter**: Click the **Select POTA Log** button on the top toolbar to choose your log file. Hovering over the button displays the active file path. Click **Reload Log** anytime to refresh stats after saving a new log.
 2. **Configure Your Station**:
    - Enter your **My Call** and **Home Grid** (e.g. `EM98dh`).
    - Select your transmitter power (5W, 100W, 500W, 1500W) and antenna preset (Dipole, Vertical, Beam, etc.) to tailor the link budget.
@@ -100,5 +103,19 @@ python3 test_pota_hunter.py
 ## Author & Acknowledgements
 
 - **Designed & Tested by:** Kevin McGrath (**W7KMC**) for the Amateur Radio and Parks on the Air (POTA) community.
-- **Data & Service Acknowledgements:** [pota.app](https://pota.app), [Blitzortung.org](https://www.blitzortung.org) Community Lightning Network, NOAA Space Weather Prediction Center (SWPC).
+- **Data & Service Acknowledgements:** [pota.app](https://pota.app), [Blitzortung.org](https://www.blitzortung.org) Community Lightning Network, [Open-Meteo.com](https://open-meteo.com/) Weather API, NOAA Space Weather Prediction Center (SWPC).
+
+---
+
+## Safety Disclaimer & Limitation of Liability
+
+**FOR RECREATIONAL & INFORMATIONAL AMATEUR RADIO USE ONLY**
+
+POTA Hunter is provided strictly for recreational amateur radio operating, propagation modeling, and educational interest. All weather forecasts, lightning cluster motion tracking, Time of Arrival (TOA) estimates, NOAA NWS convective alert warnings, band noise calculations, and ionospheric propagation scores are generated by automated computer models and third-party network feeds.
+
+**THIS SOFTWARE MUST NEVER BE RELIED UPON FOR LIFE SAFETY, WEATHER HAZARD PREDICTION, LIGHTNING PROTECTION, OR EMERGENCY FIELD PLANNING.**
+
+Severe weather, lightning strikes, electrostatic discharges, and atmospheric conditions can change, intensify, or strike rapidly without warning or detection by remote sensors. Amateur radio operators operating portable in parks or at fixed station locations are solely responsible for maintaining situational awareness, observing local environmental conditions, and taking appropriate safety precautions (including immediately shutting down, disconnecting antenna feedlines, grounding equipment, and seeking proper shelter during lightning activity).
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE DEVELOPER(S), AUTHOR(S), OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING BUT NOT LIMITED TO PERSONAL INJURY, LOSS OF LIFE, PROPERTY DAMAGE, EQUIPMENT DAMAGE, OR INACCURACIES) ARISING OUT OF OR IN CONNECTION WITH THE USE, RELIANCE UPON, OR INABILITY TO USE THIS SOFTWARE.
 

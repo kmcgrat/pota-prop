@@ -357,6 +357,24 @@ class PropagationResult:
     lightning_summary: Optional[Any] = None
 
 
+@dataclass
+class BandNoiseBreakdown:
+    """Detailed ITU-R P.372 and real-time lightning noise figure breakdown for a single amateur band."""
+    band: str
+    freq_mhz: float
+    f_atm_base_db: float
+    qrn_surge_db: float
+    f_atm_total_db: float
+    f_gal_db: float
+    f_man_db: float
+    f_a_total_db: float
+    noise_power_dbm: float
+    s_units_val: float
+    s_units_label: str
+    dominant_source: str
+    is_elevated_qrn: bool = False
+
+
 # -------------------------------------------------------------
 # Station Transmitter Power Output & Antenna Characteristics
 # -------------------------------------------------------------
@@ -2078,8 +2096,12 @@ def calculate_qso_probability(
     f_man = max(10.0, 52.0 - 27.7 * math.log10(freq_mhz))
     # 2. Galactic noise figure (penetrating above critical plasma frequency)
     f_gal = max(4.0, 52.0 - 23.0 * math.log10(freq_mhz))
-    # 3. Atmospheric baseline noise figure (ITU-R P.372 median atmospheric noise)
-    f_atm_base = max(6.0, 62.0 - 33.0 * math.log10(freq_mhz) - (5.0 if daylight_path > 0.3 else 0.0))
+    # 3. Atmospheric baseline noise figure (ITU-R P.372 diurnal atmospheric noise)
+    # At night, lack of D-layer absorption allows distant global thunderstorm sferics to elevate LF/MF/low-HF noise.
+    f_atm_day = max(6.0, 56.0 - 32.0 * math.log10(freq_mhz))
+    f_atm_night = max(6.0, 72.5 - 37.5 * math.log10(freq_mhz))
+    sun_factor = max(0.0, min(1.0, daylight_path))
+    f_atm_base = (sun_factor * f_atm_day) + ((1.0 - sun_factor) * f_atm_night)
 
     # 4. Add dynamic lightning QRN surge if available
     qrn_surge_db = 0.0
@@ -2231,3 +2253,129 @@ def calculate_qso_probability(
         qrn_surge_db=round(qrn_surge_db, 1),
         lightning_summary=lightning_summary,
     )
+
+
+# -------------------------------------------------------------
+# Band Noise Floor Matrix Calculator (ITU-R P.372 & Live Lightning)
+# -------------------------------------------------------------
+AMATEUR_BANDS_NOISE_PROFILES = [
+    ("160m", 1.840),
+    ("80m", 3.550),
+    ("60m", 5.350),
+    ("40m", 7.150),
+    ("30m", 10.125),
+    ("20m", 14.150),
+    ("17m", 18.110),
+    ("15m", 21.250),
+    ("12m", 24.940),
+    ("10m", 28.500),
+    ("6m", 50.150),
+]
+
+
+def compute_band_noise_matrix(
+    home_lat: float,
+    home_lon: float,
+    solar_weather: Optional[SolarWeather] = None,
+    lightning_summary: Optional[Any] = None,
+    dt_utc: Optional[datetime] = None,
+    bandwidth_hz: float = 2400.0,
+) -> List[BandNoiseBreakdown]:
+    """
+    Computes a comprehensive noise breakdown across all amateur HF/VHF bands:
+    - Diurnal ITU-R P.372 atmospheric baseline (day vs night global lightning ducting)
+    - Real-time regional lightning surge (from Blitzortung + NWS warnings)
+    - Galactic cosmic noise floor
+    - Man-made environmental noise floor
+    - Total combined receiver noise figure (Fa), noise power (dBm), and S-meter readings.
+    """
+    if dt_utc is None:
+        dt_utc = datetime.now(timezone.utc)
+    if solar_weather is None:
+        solar_weather = SolarWeather()
+
+    # Calculate solar elevation at operator's QTH for diurnal day/night transition
+    sol_elev = calculate_solar_elevation(home_lat, home_lon, dt_utc)
+    if sol_elev >= 0.0:
+        daylight_factor = 1.0
+    elif sol_elev <= -12.0:
+        daylight_factor = 0.0
+    else:
+        # Astronomical to nautical/civil twilight interpolation
+        daylight_factor = (sol_elev + 12.0) / 12.0
+
+    results: List[BandNoiseBreakdown] = []
+
+    for band_name, freq_mhz in AMATEUR_BANDS_NOISE_PROFILES:
+        # 1. Atmospheric baseline (ITU-R P.372 diurnal curves)
+        f_atm_day = max(6.0, 56.0 - 32.0 * math.log10(freq_mhz))
+        f_atm_night = max(6.0, 72.5 - 37.5 * math.log10(freq_mhz))
+        f_atm_base = (daylight_factor * f_atm_day) + ((1.0 - daylight_factor) * f_atm_night)
+
+        # 2. Live regional lightning QRN surge (dB)
+        qrn_surge = 0.0
+        if lightning_summary is not None and hasattr(lightning_summary, "get_qrn_surge_db"):
+            try:
+                qrn_surge = lightning_summary.get_qrn_surge_db(freq_mhz)
+            except Exception:
+                qrn_surge = 0.0
+
+        f_atm_total = f_atm_base + qrn_surge
+
+        # 3. Galactic / Cosmic noise figure (dB)
+        f_gal = max(4.0, 52.0 - 23.0 * math.log10(freq_mhz))
+
+        # 4. Man-made baseline noise figure (quiet rural / residential amateur baseline)
+        f_man = max(10.0, 52.0 - 27.7 * math.log10(freq_mhz))
+
+        # 5. Total Noise Figure F_a (dB)
+        f_a_total = 10.0 * math.log10(
+            10.0 ** (f_man / 10.0) + 10.0 ** (f_gal / 10.0) + 10.0 ** (f_atm_total / 10.0)
+        )
+
+        # 6. Receiver Noise Power in Bandwidth (dBm)
+        # Thermal noise floor kTB = -174 dBm/Hz + 10*log10(BW) + Fa
+        noise_power_dbm = -174.0 + 10.0 * math.log10(bandwidth_hz) + f_a_total
+
+        # 7. S-Unit calculation (IARU HF standard: S9 = -73 dBm, S0 = -127 dBm, 6 dB/S-unit)
+        s_val = (noise_power_dbm - (-127.0)) / 6.0
+        if s_val < 0.2:
+            s_label = "S0 (Quiet)"
+        elif s_val <= 9.0:
+            s_label = f"S{int(round(s_val))}"
+        else:
+            db_over = noise_power_dbm - (-73.0)
+            s_label = f"S9+{int(round(db_over))}dB"
+
+        # 8. Dominant noise source
+        p_atm = 10.0 ** (f_atm_total / 10.0)
+        p_gal = 10.0 ** (f_gal / 10.0)
+        p_man = 10.0 ** (f_man / 10.0)
+        if p_atm >= p_gal and p_atm >= p_man:
+            dominant = "Atmosphere (QRN)"
+        elif p_gal >= p_man:
+            dominant = "Space / Cosmic"
+        else:
+            dominant = "Man-Made (QRM)"
+
+        is_elevated = (qrn_surge >= 3.0) or (s_val >= 4.0)
+
+        results.append(
+            BandNoiseBreakdown(
+                band=band_name,
+                freq_mhz=freq_mhz,
+                f_atm_base_db=round(f_atm_base, 1),
+                qrn_surge_db=round(qrn_surge, 1),
+                f_atm_total_db=round(f_atm_total, 1),
+                f_gal_db=round(f_gal, 1),
+                f_man_db=round(f_man, 1),
+                f_a_total_db=round(f_a_total, 1),
+                noise_power_dbm=round(noise_power_dbm, 1),
+                s_units_val=round(s_val, 1),
+                s_units_label=s_label,
+                dominant_source=dominant,
+                is_elevated_qrn=is_elevated,
+            )
+        )
+
+    return results

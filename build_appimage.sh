@@ -64,7 +64,7 @@ chmod +x AppDir/AppRun
 # 7. Package using appimagetool
 echo "=== Packaging AppImage ==="
 export ARCH=x86_64
-export VERSION="26.8.5"
+export VERSION="26.8.7"
 
 
 # Run appimagetool to create the final AppImage file
