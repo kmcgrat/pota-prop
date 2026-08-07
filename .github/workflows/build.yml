@@ -1,7 +1,10 @@
+cat <<'EOF' > .github/workflows/build.yml
 name: Multi-Platform Build
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -57,25 +60,10 @@ jobs:
           mkdir -p AppDir/usr/bin
           cp -r dist/pota-hunter/* AppDir/usr/bin/
 
-          cat <<EOF > AppDir/pota-hunter.desktop
-          [Desktop Entry]
-          Name=POTA Hunter
-          Exec=pota-hunter
-          Icon=pota-hunter
-          Type=Application
-          Categories=Utility;
-          EOF
-
+          printf "[Desktop Entry]\nName=POTA Hunter\nExec=pota-hunter\nIcon=pota-hunter\nType=Application\nCategories=Utility;\n" > AppDir/pota-hunter.desktop
           touch AppDir/pota-hunter.png
 
-          cat <<'EOF' > AppDir/AppRun
-          #!/bin/bash
-          HERE="$(dirname "$(readlink -f "${0}")")"
-          export PATH="${HERE}/usr/bin:${PATH}"
-          export LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"
-          export QT_QPA_PLATFORM=xcb
-          exec "${HERE}/usr/bin/pota-hunter" "$@"
-          EOF
+          printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "${0}")")"\nexport PATH="${HERE}/usr/bin:${PATH}"\nexport LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"\nexport QT_QPA_PLATFORM=xcb\nexec "${HERE}/usr/bin/pota-hunter" "$@"\n' > AppDir/AppRun
           chmod +x AppDir/AppRun
 
           wget https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage
@@ -119,3 +107,4 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/pota-hunter-mac.zip
+EOF
