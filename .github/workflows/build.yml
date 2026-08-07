@@ -65,9 +65,9 @@ jobs:
           printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "${0}")")"\nexport PATH="${HERE}/usr/bin:${PATH}"\nexport LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"\nexport QT_QPA_PLATFORM=xcb\nexec "${HERE}/usr/bin/pota-hunter" "$@"\n' > AppDir/AppRun
           chmod +x AppDir/AppRun
 
-          wget https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage
+          wget -O appimagetool-x86_64.AppImage https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
-          ./appimagetool-x86_64.AppImage AppDir POTA_Hunter-x86_64.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool-x86_64.AppImage AppDir POTA_Hunter-x86_64.AppImage
 
       # --- Windows Build ---
       - name: Build Windows Executable
