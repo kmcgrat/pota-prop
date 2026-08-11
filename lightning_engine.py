@@ -611,7 +611,12 @@ class RegionalLightningSummary:
                 "<th style='text-align: left; padding: 2px 0;'>Total Strikes (window)</th>"
                 "</tr>"
             )
-            for cluster in active_cells[:2]:
+            nearest_cells = active_cells[:4]
+            remaining_cells = active_cells[4:]
+            approaching_cells = [c for c in remaining_cells if c.is_approaching][:2]
+            cells_to_display = nearest_cells + approaching_cells
+
+            for cluster in cells_to_display:
                 window_min = cluster.cluster_window_minutes if cluster.cluster_window_minutes > 0 else 15
                 total_stk = cluster.total_strikes_in_cluster if cluster.total_strikes_in_cluster > 0 else cluster.estimated_strikes_15m
                 rate_stk = cluster.estimated_strikes_per_min

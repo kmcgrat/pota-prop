@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-POTA Hunter
+POTA Prop
 A modern desktop GUI application for amateur radio operators hunting Parks on the Air.
 Compares your hunted parks history against live POTA active spots.
 """
@@ -13,7 +13,7 @@ import webbrowser
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-APP_VERSION = "26.8.7"
+APP_VERSION = "26.8.10"
 
 
 from PyQt6.QtCore import (
@@ -22,6 +22,7 @@ from PyQt6.QtCore import (
     QSettings,
     QSize,
     Qt,
+    QUrl,
     QThreadPool,
     QTimer,
     pyqtSignal,
@@ -40,6 +41,8 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
+    QFormLayout,
     QDialog,
     QFileDialog,
     QFrame,
@@ -62,6 +65,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineCore import QWebEngineProfile
 
 from data_engine import (
     DEFAULT_HUNTER_CSV_PATH,
@@ -73,12 +78,16 @@ from data_engine import (
     fetch_park_info,
     load_hunter_csv,
     normalize_ref,
+    fetch_hunter_parks_from_api,
+    submit_spot_to_api,
 )
+from auth_engine import POTAAuthenticator
 from lightning_engine import (
     LightningActivityLevel,
     RegionalLightningSummary,
     fetch_regional_lightning_summary,
     reset_lightning_engine_location,
+    point_in_polygon,
 )
 from weather_engine import (
     WeatherForecastSummary,
@@ -538,6 +547,31 @@ class StatCard(QFrame):
         )
 
 
+class WeatherRadarDialog(QDialog):
+    """
+    Live Weather Radar dialog embedding a Windy.com interactive radar map centered on the user's location.
+    """
+    def __init__(self, home_lat: float, home_lon: float, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Live Weather Radar (Windy.com)")
+        self.resize(1000, 750)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.web_view = QWebEngineView(self)
+        
+        # Build Windy Embed URL
+        url = (
+            f"https://embed.windy.com/embed2.html?lat={home_lat}&lon={home_lon}"
+            f"&zoom=7&level=surface&overlay=radar&menu=&message=&marker=&calendar=&pressure=&type=map"
+            f"&location=coordinates&detail=&detailLat={home_lat}&detailLon={home_lon}"
+            f"&metricWind=mph&metricTemp=f&radarRange=-1"
+        )
+        self.web_view.setUrl(QUrl(url))
+        
+        layout.addWidget(self.web_view)
+
 class BandNoiseDialog(QDialog):
     """
     Dedicated modal dialog displaying real-time receiver noise floor and S-meter readings
@@ -993,15 +1027,88 @@ class SpotHistoryDialog(QDialog):
         layout.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignRight)
 
 
-class AboutDialog(QDialog):
+class DonateDialog(QDialog):
     """
-    Modal dialog displaying software version, application overview, key features,
-    safety disclaimers, and helpful web links for POTA Hunter.
+    Modal dialog providing donation links to support the developer.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("About POTA Hunter")
+        self.setWindowTitle("Support POTA Prop")
+        self.resize(400, 320)
+        self.setStyleSheet(DARK_STYLESHEET)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        title = QLabel("Support the Developer")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #58a6ff;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "If you find POTA Prop useful and would like to help support its continued "
+            "development, consider buying me a coffee! Your support is greatly appreciated."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #e6edf3; font-size: 13px;")
+        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(desc)
+
+        # PayPal Button
+        paypal_btn = QPushButton("Donate via PayPal ($5)")
+        paypal_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        paypal_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0070ba;
+                color: white;
+                font-weight: bold;
+                border-radius: 6px;
+                padding: 10px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #005ea6;
+            }
+        """)
+        paypal_btn.clicked.connect(lambda: webbrowser.open("https://paypal.me/w7kmc/5"))
+        layout.addWidget(paypal_btn)
+
+        # Ko-fi Button
+        kofi_btn = QPushButton("Donate via Ko-fi")
+        kofi_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        kofi_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ff5e5b;
+                color: white;
+                font-weight: bold;
+                border-radius: 6px;
+                padding: 10px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #e05350;
+            }
+        """)
+        kofi_btn.clicked.connect(lambda: webbrowser.open("https://ko-fi.com/"))
+        layout.addWidget(kofi_btn)
+
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+
+
+class AboutDialog(QDialog):
+    """
+    Modal dialog displaying software version, application overview, key features,
+    safety disclaimers, and helpful web links for POTA Prop.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("About POTA Prop")
         self.resize(650, 720)
         self.setMinimumSize(600, 580)
         self.setStyleSheet(DARK_STYLESHEET)
@@ -1027,7 +1134,7 @@ class AboutDialog(QDialog):
         layout.setSpacing(12)
 
         # App Header
-        app_name = QLabel("POTA Hunter")
+        app_name = QLabel("POTA Prop")
         app_name.setStyleSheet("font-size: 24px; font-weight: bold; color: #58a6ff;")
         layout.addWidget(app_name)
 
@@ -1043,7 +1150,7 @@ class AboutDialog(QDialog):
 
         # Description
         desc_label = QLabel(
-            "POTA Hunter compares your historical hunted parks log against live active spots "
+            "POTA Prop compares your historical hunted parks log against live active spots "
             "from pota.app in real-time. It provides propagation estimations, multi-layer ionospheric "
             "modeling (1E–4F2), skip-zone cutoff calculations, Open-Meteo local weather forecasts, "
             "and regional 750-mile Blitzortung.org lightning QRN monitoring."
@@ -1075,6 +1182,21 @@ class AboutDialog(QDialog):
             features_layout.addWidget(lbl)
 
         layout.addWidget(features_box)
+        
+        # License Box
+        license_box = QGroupBox("License")
+        license_layout = QVBoxLayout(license_box)
+        license_layout.setContentsMargins(12, 10, 12, 10)
+        
+        license_lbl = QLabel(
+            "This project is licensed under the <b>GNU General Public License v3.0 (GPLv3)</b>. "
+            "You are free to use, modify, and distribute this software for amateur radio purposes, "
+            "provided that any derivative works are also open-source and released under the same GPLv3 license."
+        )
+        license_lbl.setWordWrap(True)
+        license_lbl.setStyleSheet("color: #8b949e; font-size: 11px; line-height: 1.4; border: none; background: transparent;")
+        license_layout.addWidget(license_lbl)
+        layout.addWidget(license_box)
 
         # Safety Disclaimer & Limitation of Liability Box
         disclaimer_box = QGroupBox("Safety Disclaimer & Limitation of Liability")
@@ -1082,7 +1204,7 @@ class AboutDialog(QDialog):
         disclaimer_layout.setContentsMargins(12, 10, 12, 10)
 
         disclaimer_lbl = QLabel(
-            "<b>FOR RECREATIONAL & INFORMATIONAL USE ONLY:</b> POTA Hunter is provided solely for "
+            "<b>FOR RECREATIONAL & INFORMATIONAL USE ONLY:</b> POTA Prop is provided solely for "
             "amateur radio recreation and educational modeling. Weather forecasts, lightning motion tracking, "
             "Time of Arrival (TOA) estimates, convective alerts, and propagation models must <b>NOT</b> be relied upon "
             "for life safety, weather hazard prediction, or field emergency planning. Severe weather, lightning strikes, "
@@ -1146,12 +1268,12 @@ class AboutDialog(QDialog):
 
 class DocumentationDialog(QDialog):
     """
-    Comprehensive User Guide and Documentation modal dialog for POTA Hunter.
+    Comprehensive User Guide and Documentation modal dialog for POTA Prop.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("POTA Hunter - User Guide & Reference")
+        self.setWindowTitle("POTA Prop - User Guide & Reference")
         self.resize(880, 680)
         self.setStyleSheet(DARK_STYLESHEET)
 
@@ -1172,7 +1294,7 @@ class DocumentationDialog(QDialog):
         h_layout = QHBoxLayout(header)
         h_layout.setContentsMargins(0, 0, 0, 0)
 
-        lbl_title = QLabel("POTA Hunter User Guide & Reference")
+        lbl_title = QLabel("POTA Prop User Guide & Reference")
         lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #58a6ff;")
         h_layout.addWidget(lbl_title)
         h_layout.addStretch()
@@ -1205,14 +1327,13 @@ class DocumentationDialog(QDialog):
         <h1 style="color: #7ee787; font-size: 18px; margin-top: 0; border-bottom: 2px solid #238636; padding-bottom: 6px;">PART I: APPLICATION OPERATION & SETUP</h1>
 
         <h2 style="color: #58a6ff; margin-top: 14px;">1. Getting Started: Downloading & Loading Your Hunter Log</h2>
-        <p><b>POTA Hunter</b> is a desktop application designed for amateur radio operators hunting Parks on the Air. It compares live activator spots from <a href="https://pota.app" style="color: #7ee787;">pota.app</a> against your historical hunted CSV log, estimating contact probability using ionospheric ray tracing, live space weather, and regional atmospheric lightning noise (QRN).</p>
+        <p><b>POTA Prop</b> is a desktop application designed for amateur radio operators hunting Parks on the Air. It compares live activator spots from <a href="https://pota.app" style="color: #7ee787;">pota.app</a> against your historical hunted CSV log, estimating contact probability using ionospheric ray tracing, live space weather, and regional atmospheric lightning noise (QRN).</p>
         
         <h3 style="color: #7ee787;">Step-by-Step Initial Setup:</h3>
         <ol>
-            <li><b>Download Your Log from pota.app:</b> Open <a href="https://pota.app" style="color: #7ee787;">pota.app</a> in your web browser and sign in. Navigate to <b>Profile</b> &rarr; <b>My Stats</b>, scroll down to the <b>Hunted Parks</b> table, and click <b>Export CSV</b>. This saves <code>hunter_parks.csv</code> to your Downloads folder.</li>
-            <li><b>Important Download Tip (Browser File Duplicates):</b> When you download a new export, web browsers automatically append <code>(1)</code> or <code>(2)</code> to the filename if an older file exists (e.g., <code>hunter_parks (1).csv</code>). Always delete or overwrite your old <code>hunter_parks.csv</code> in your Downloads folder before downloading a new one, or use the <b>Select POTA Log</b> button in POTA Hunter to choose the exact file.</li>
-            <li><b>Load Into POTA Hunter:</b> Click the <b>Select POTA Log</b> button on the top toolbar to choose your <code>hunter_parks.csv</code> file. Mousing over the <b>Select POTA Log</b> button reveals the active file path in a hover tooltip. Click <b>Reload Log</b> (or press <i>Ctrl+O</i>) anytime to refresh your stats after saving new logs. The app compares active spots against your log, highlighting <b>NEW (unhunted)</b> parks versus parks you have already worked.</li>
-            <li><b>Operator Callsign:</b> Enter your callsign in the <b>My Call</b> field. The app automatically looks up your home Maidenhead grid locator from online databases.</li>
+            <li><b>Authenticate with POTA.app:</b> Click the <b>Sign In POTA.app</b> button on the top toolbar. A secure browser window will open, allowing you to log into your pota.app account. Once signed in, POTA Prop will automatically extract your authentication token and close the window.</li>
+            <li><b>Auto-Sync Your Hunter Log:</b> Once authenticated, click <b>Sync POTA Data</b>. The application will instantly connect to the POTA API, download your entire historical hunted log, and integrate it into the application automatically. No more downloading CSV files manually!</li>
+            <li><b>Operator Callsign:</b> Enter your callsign in the <b>My Call</b> field. The app automatically looks up your home Maidenhead grid locator from online databases (or DXCC prefix mapping if you are international).</li>
             <li><b>Home Grid:</b> Enter your Maidenhead Grid Locator (e.g. <code>EM98dh</code>) to establish your exact QTH reference point for distance, bearing, and propagation calculations.</li>
         </ol>
 
@@ -1223,7 +1344,7 @@ class DocumentationDialog(QDialog):
             <li><b>Multi-Criteria Filters:</b> Filter spots by Status (<i>All</i>, <i>New</i>, <i>Hunted</i>, <i>Worked</i>, <i>P2P</i>), Score Threshold (<i>All</i>, <i>&ge;25</i>, <i>&ge;50</i>, <i>&ge;75</i>, <i>&ge;99</i>), Band, and Mode.</li>
             <li><b>Instant Search:</b> Type any callsign, park reference, park name, state, grid, or comment keyword into the search box for real-time table filtering.</li>
             <li><b>Transmitter Power (Watts):</b> Select your rig's output power (QRP 5W, 100W, 500W, or 1500W Legal Limit). The link budget calculation adjusts transmitter output in dBW and expected receiver SNR accordingly.</li>
-            <li><b>Dynamic Antenna Elevation Modeling:</b> Choose your antenna setup (Dipole, End-Fed Half Wave, Vertical, Magnetic Loop, Random Wire, or 3-Element Beam). POTA Hunter calculates the take-off launch angle (&Delta;) from the ray-tracer and computes the antenna's gain G(&Delta;, f) at that elevation angle:
+            <li><b>Dynamic Antenna Elevation Modeling:</b> Choose your antenna setup (Dipole, End-Fed Half Wave, Vertical, Magnetic Loop, Random Wire, or 3-Element Beam). POTA Prop calculates the take-off launch angle (&Delta;) from the ray-tracer and computes the antenna's gain G(&Delta;, f) at that elevation angle:
                 <ul>
                     <li><b>Beam / Yagi / Hexbeam:</b> Provides low-angle DX gain (&Delta; 5°–20°) for long-distance multi-hop paths.</li>
                     <li><b>Vertical (1/4-wave / 5/8-wave):</b> Low takeoff lobe (+4.5 to +5.5 dBi at &Delta; 8°–22°), with reduced response at steep NVIS angles (&Delta; &gt; 45°).</li>
@@ -1256,7 +1377,7 @@ class DocumentationDialog(QDialog):
         </ul>
 
         <h3 style="color: #7ee787;">Automatic Re-Spotting Prompt:</h3>
-        <p>When you mark a park as worked, POTA Hunter displays a prompt asking if you'd like to open <code>pota.app</code> to re-spot the activator. Clicking <b>Open pota.app to Spot</b> takes you straight to the park page in your browser so you can submit your spot.</p>
+        <p>When you mark a park as worked, POTA Prop displays a prompt asking if you'd like to open <code>pota.app</code> to re-spot the activator. Clicking <b>Open pota.app to Spot</b> takes you straight to the park page in your browser so you can submit your spot.</p>
 
         <h3 style="color: #7ee787;">Community Re-Spotting:</h3>
         <p>Re-spotting updates the global POTA network, refreshing the activator's active window and providing current spot evidence for other hunters in your region.</p>
@@ -1272,7 +1393,7 @@ class DocumentationDialog(QDialog):
         
         <h3 style="color: #7ee787;">Keyboard Shortcuts:</h3>
         <table border="0" cellpadding="5" cellspacing="0" style="color: #c9d1d9; font-size: 13px;">
-            <tr><td><b style="color: #58a6ff;">F1</b></td><td>Open About POTA Hunter window</td></tr>
+            <tr><td><b style="color: #58a6ff;">F1</b></td><td>Open About POTA Prop window</td></tr>
             <tr><td><b style="color: #58a6ff;">F2 / Ctrl+H</b></td><td>Open this Documentation & Guide window</td></tr>
             <tr><td><b style="color: #58a6ff;">F5</b></td><td>Trigger immediate manual spot & weather refresh</td></tr>
             <tr><td><b style="color: #58a6ff;">F6</b></td><td>Open Receiver Band Noise Floor Matrix dialog</td></tr>
@@ -1285,10 +1406,11 @@ class DocumentationDialog(QDialog):
         <h1 style="color: #7ee787; font-size: 18px; margin-top: 16px; border-bottom: 2px solid #238636; padding-bottom: 6px;">PART II: PROPAGATION MODELING & TELEMETRY GUIDE</h1>
 
         <h2 style="color: #58a6ff; margin-top: 14px;">5. QSO Score, Reliability (REL), and The "+" Local Verification Symbol</h2>
-        <p>POTA Hunter calculates an estimated <b>QSO Score</b> (0 to 100+) for every active spot. This score estimates the likelihood of completing a QSO with that activator based on ray-hop geometry, link budget SNR, ionospheric absorption, regional lightning QRN noise, and real-time spotter reports.</p>
+        <p>POTA Prop calculates an estimated <b>QSO Score</b> (0 to 100+) for every active spot. This score estimates the likelihood of completing a QSO with that activator based on ray-hop geometry, link budget SNR, ionospheric absorption, regional lightning QRN noise, and real-time spotter reports.</p>
         
         <h3 style="color: #7ee787;">What Does the "+" Symbol Mean (e.g. <code>85+</code>)?</h3>
-        <p>The <b><code>+</code> symbol</b> next to a score indicates <b>Local Spot Verification</b>. When independent third-party spotters in your geographical region (e.g., nearby call areas or local spotters) re-spot an activator, it indicates that the signal is actively propagating into your area. The engine adds a score adjustment and marks the spotter comment with a green <code>+</code> tag.</p>
+        <p>The <b><code>+</code> symbol</b> next to a score indicates <b>Local Spot Verification</b>. When independent third-party spotters in your geographical region (e.g., nearby call areas, local spotters, or fellow hams in your country if you are DX) re-spot an activator, it indicates that the signal is actively propagating into your area. The engine adds a score adjustment and marks the spotter comment with a green <code>+</code> tag.</p>
+        <p><b>Global DXCC Support:</b> Whether you are in US 8-Land, Canada, France, or Australia, POTA Prop uses a global RegionalPathMatrix that automatically understands your home DXCC entity and maps spotter regions worldwide to provide tailored verification bonuses to your location!</p>
         <p><b>Activator Self-Spot Protection:</b> Activator self-spots (where the spotter callsign matches the activator) are not counted as third-party local spotters, preventing self-spots from triggering a <code>+</code> badge. Self-spot comments are still parsed for frequency changes and QRT notifications.</p>
 
         <h3 style="color: #7ee787;">Diagnostic Mouseover Tooltips:</h3>
@@ -1297,7 +1419,7 @@ class DocumentationDialog(QDialog):
         <hr style="border: 1px solid #30363d;" />
 
         <h2 style="color: #58a6ff;">6. Multi-Layer Ionospheric Profiling & Multi-Hop Ray Tracing</h2>
-        <p>POTA Hunter models how radio waves refract through the ionosphere using standard ionospheric layers and ray geometry:</p>
+        <p>POTA Prop models how radio waves refract through the ionosphere using standard ionospheric layers and ray geometry:</p>
         
         <h3 style="color: #7ee787;">1. Multi-Layer Ionospheric Profile (E, F1, F2 Layers):</h3>
         <ul>
@@ -1335,11 +1457,11 @@ class DocumentationDialog(QDialog):
         <hr style="border: 1px solid #30363d;" />
 
         <h2 style="color: #58a6ff;">8. Regional Lightning & Convective Threat Engine (Hybrid NWS & Blitzortung Telemetry)</h2>
-        <p>Thunderstorms and lightning static crashes (QRN) create intense wideband noise pulses that degrade receiver signal-to-noise ratios. POTA Hunter combines official weather alerts with live stroke telemetry to monitor regional storms and protect station equipment:</p>
+        <p>Thunderstorms and lightning static crashes (QRN) create intense wideband noise pulses that degrade receiver signal-to-noise ratios. POTA Prop combines official weather alerts with live stroke telemetry to monitor regional storms and protect station equipment:</p>
 
         <h3 style="color: #7ee787;">1. Hybrid Architecture: Instant Bootstrap & Live WebSocket Telemetry:</h3>
         <ul>
-            <li><b>Instant NOAA NWS Convective Alerts:</b> On startup or whenever you change your Maidenhead operating grid, POTA Hunter immediately queries active NOAA NWS Convective Alerts (Severe Thunderstorm, Tornado, Special Marine, and Flash Flood warnings) within your 750-mile monitoring radius. This provides instant storm awareness without waiting for background stream buffers.</li>
+            <li><b>Instant NOAA NWS Convective Alerts & Popups:</b> On startup or whenever you change your Maidenhead operating grid, POTA Prop immediately queries active NOAA NWS Convective Alerts (Severe Thunderstorm, Tornado, Special Marine, and Flash Flood warnings) within your 750-mile monitoring radius. If your location falls exactly inside an active warning polygon, POTA Prop will trigger an active screen-interrupting warning popup!</li>
             <li><b>Live Blitzortung.org WebSocket Stream:</b> The application maintains an asynchronous background WebSocket connection to the <a href="https://www.blitzortung.org" style="color: #7ee787;">Blitzortung.org</a> community detection network, receiving live microsecond stroke telemetry worldwide.</li>
             <li><b>15-Minute Smooth Blending Warmup:</b> The engine smoothly blends NWS alert models into real-time Blitzortung strike counts over a 15-minute warmup curve:
                 <br /><code>blended_rate = (1 - &alpha;) × NWS_rate + &alpha; × Live_rate</code>
@@ -1427,7 +1549,7 @@ class DocumentationDialog(QDialog):
         <hr style="border: 1px solid #30363d;" />
 
         <h2 style="color: #58a6ff;">9. Receiver Band Noise Floor Matrix & ITU-R P.372 Modeling (F6)</h2>
-        <p>A station's ability to copy weak POTA activators depends directly on the receiver noise floor. POTA Hunter implements a comprehensive, 11-band noise floor engine modeled after <b>ITU-R P.372-16</b> and real-time environmental telemetry:</p>
+        <p>A station's ability to copy weak POTA activators depends directly on the receiver noise floor. POTA Prop implements a comprehensive, 11-band noise floor engine modeled after <b>ITU-R P.372-16</b> and real-time environmental telemetry:</p>
 
         <h3 style="color: #7ee787;">1. The Band Noise Dashboard Card & Modal Matrix (F6):</h3>
         <ul>
@@ -1436,12 +1558,12 @@ class DocumentationDialog(QDialog):
         </ul>
 
         <h3 style="color: #7ee787;">2. ITU-R P.372 Noise Floor Components & Diurnal Modeling:</h3>
-        <p>For each amateur band from 160m to 6m, POTA Hunter calculates the individual noise components that combine to form the total antenna noise figure (F<sub>a</sub>):</p>
+        <p>For each amateur band from 160m to 6m, POTA Prop calculates the individual noise components that combine to form the total antenna noise figure (F<sub>a</sub>):</p>
         <ul>
             <li><b>Base Atmospheric Noise (F<sub>atm</sub>) & Diurnal Day/Night Variation:</b> Atmospheric noise originates from tropical and regional lightning discharges propagating through the Earth-ionosphere waveguide.
                 <ul>
                     <li><b>Daytime:</b> Solar radiation creates a dense D-layer (75 km), absorbing low-frequency skywaves and resulting in a lower atmospheric noise floor.</li>
-                    <li><b>Nighttime:</b> The D-layer vanishes after sunset. Thunderstorm static from across the globe propagates with minimal absorption, causing nighttime noise on 160m and 80m to rise by <b>+10 to +20 dB (2 to 3+ S-units)</b>. POTA Hunter models this solar diurnal curve based on local solar elevation at your QTH.</li>
+                    <li><b>Nighttime:</b> The D-layer vanishes after sunset. Thunderstorm static from across the globe propagates with minimal absorption, causing nighttime noise on 160m and 80m to rise by <b>+10 to +20 dB (2 to 3+ S-units)</b>. POTA Prop models this solar diurnal curve based on local solar elevation at your QTH.</li>
                 </ul>
             </li>
             <li><b>Lightning QRN Surge (&Delta;F<sub>QRN</sub>):</b> Real-time noise injected from convective storm cells within 750 miles based on live Blitzortung telemetry.</li>
@@ -1459,7 +1581,7 @@ class DocumentationDialog(QDialog):
         <hr style="border: 1px solid #30363d;" />
 
         <h2 style="color: #58a6ff;">10. Link Budget, Antenna Elevation Gain & Signal-to-Noise Ratio (SNR)</h2>
-        <p>POTA Hunter calculates an RF link budget for every active spot using standard transmission equations:</p>
+        <p>POTA Prop calculates an RF link budget for every active spot using standard transmission equations:</p>
 
         <h3 style="color: #7ee787;">1. Path Loss Formulation (L<sub>b</sub>):</h3>
         <ul>
@@ -1494,7 +1616,7 @@ class DocumentationDialog(QDialog):
         </ul>
 
         <h3 style="color: #7ee787;">NOAA GOES Satellite Solar Flares & Radio Blackouts (R1 to R5):</h3>
-        <p>POTA Hunter monitors real-time 0.1–0.8nm X-ray flux from NOAA GOES satellites:</p>
+        <p>POTA Prop monitors real-time 0.1–0.8nm X-ray flux from NOAA GOES satellites:</p>
         <ul>
             <li><b>M-Class Flares (R1/R2 Blackout):</b> Applies a <b>-15 to -25 point adjustment</b> on daylight HF paths due to increased D-layer absorption.</li>
             <li><b>X-Class Flares (R3/R4/R5 Severe Blackout):</b> Applies a <b>-40 to -50 point adjustment</b> to reflect radio blackout conditions.</li>
@@ -1509,7 +1631,7 @@ class DocumentationDialog(QDialog):
         <hr style="border: 1px solid #30363d;" />
 
         <h2 style="color: #58a6ff;">12. Tooltip Propagation Outcomes & Telemetry Reference Guide</h2>
-        <p>When you hover your mouse over any <b>Score</b> badge or row in the table, POTA Hunter displays a diagnostic popup. Below is a reference of the telemetry lines:</p>
+        <p>When you hover your mouse over any <b>Score</b> badge or row in the table, POTA Prop displays a diagnostic popup. Below is a reference of the telemetry lines:</p>
         
         <h3 style="color: #7ee787;">Telemetry Elements:</h3>
         <ul>
@@ -1531,11 +1653,17 @@ class DocumentationDialog(QDialog):
             <li><b>Activator QRT (Off the air):</b> Activator station has shut down (QSO score = 0).</li>
         </ul>
 
+        <hr style="border: 1px solid #30363d;" />
+        
+        <h2 style="color: #58a6ff;">13. Open Source License</h2>
+        <p>This project is licensed under the <b>GNU General Public License v3.0 (GPLv3)</b>.</p>
+        <p>You are free to use, modify, and distribute this software for amateur radio purposes, provided that any derivative works are also open-source and released under the same GPLv3 license.</p>
+
         <br />
         <h1 style="color: #f85149; font-size: 18px; margin-top: 16px; border-bottom: 2px solid #f85149; padding-bottom: 6px;">PART III: FIELD SAFETY DISCLAIMER & LIMITATION OF LIABILITY</h1>
 
         <p style="color: #ffa657; font-weight: bold; font-size: 13px;">PLEASE READ CAREFULLY BEFORE USING THIS SOFTWARE IN THE FIELD:</p>
-        <p><b>1. Recreational & Educational Purpose Only:</b> POTA Hunter is provided strictly for recreational amateur radio operating, propagation modeling, and educational interest. All weather forecasts, lightning cluster motion tracking, Time of Arrival (TOA) estimates, NOAA NWS convective alert warnings, band noise calculations, and ionospheric propagation scores are generated by automated computer models and third-party network feeds.</p>
+        <p><b>1. Recreational & Educational Purpose Only:</b> POTA Prop is provided strictly for recreational amateur radio operating, propagation modeling, and educational interest. All weather forecasts, lightning cluster motion tracking, Time of Arrival (TOA) estimates, NOAA NWS convective alert warnings, band noise calculations, and ionospheric propagation scores are generated by automated computer models and third-party network feeds.</p>
         
         <p><b>2. NOT FOR LIFE SAFETY OR EMERGENCY USE:</b> This software must <b>NEVER</b> be relied upon as a primary source for life safety decisions, weather hazard prediction, lightning protection, or emergency field planning. Severe weather, lightning strikes, electrostatic discharges, and atmospheric conditions can change, intensify, or strike rapidly without warning or detection by remote sensors.</p>
         
@@ -1577,10 +1705,106 @@ class DocumentationDialog(QDialog):
 
 
 
-class POTAHunterApp(QMainWindow):
+class SyncWorkerSignals(QObject):
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+class SyncWorker(QRunnable):
+    def __init__(self, id_token: str, save_path: str):
+        super().__init__()
+        self.id_token = id_token
+        self.save_path = save_path
+        self.signals = SyncWorkerSignals()
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            hunted = fetch_hunter_parks_from_api(self.id_token, self.save_path)
+            self.signals.finished.emit(hunted)
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+class SpotWorkerSignals(QObject):
+    finished = pyqtSignal(bool)
+    error = pyqtSignal(str)
+
+class SpotWorker(QRunnable):
+    def __init__(self, payload: dict, id_token: Optional[str]):
+        super().__init__()
+        self.payload = payload
+        self.id_token = id_token
+        self.signals = SpotWorkerSignals()
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            success = submit_spot_to_api(self.payload, self.id_token)
+            if success:
+                self.signals.finished.emit(True)
+            else:
+                self.signals.error.emit("Failed to submit spot.")
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+class SpotDialog(QDialog):
+    def __init__(self, activator: str, reference: str, frequency: str, mode: str, my_call: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Spot Activator")
+        self.setMinimumWidth(350)
+        self.setStyleSheet(DARK_STYLESHEET)
+
+        layout = QVBoxLayout(self)
+
+        # Form Layout
+        form_layout = QFormLayout()
+        
+        self.txt_activator = QLineEdit(activator)
+        form_layout.addRow("Activator:", self.txt_activator)
+        
+        self.txt_spotter = QLineEdit(my_call)
+        form_layout.addRow("Spotter (You):", self.txt_spotter)
+        
+        self.txt_freq = QLineEdit(frequency)
+        form_layout.addRow("Frequency (kHz):", self.txt_freq)
+        
+        self.txt_mode = QLineEdit(mode)
+        form_layout.addRow("Mode:", self.txt_mode)
+        
+        self.txt_ref = QLineEdit(reference)
+        form_layout.addRow("Park Reference:", self.txt_ref)
+        
+        self.txt_comments = QLineEdit()
+        self.txt_comments.setPlaceholderText("Optional comments...")
+        form_layout.addRow("Comments:", self.txt_comments)
+        
+        layout.addLayout(form_layout)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self.btn_submit = QPushButton("Submit Spot")
+        self.btn_submit.clicked.connect(self.accept)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(self.btn_submit)
+        btn_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def get_spot_data(self):
+        return {
+            "activator": self.txt_activator.text().strip().upper(),
+            "spotter": self.txt_spotter.text().strip().upper(),
+            "frequency": self.txt_freq.text().strip(),
+            "mode": self.txt_mode.text().strip().upper(),
+            "reference": self.txt_ref.text().strip().upper(),
+            "source": "POTA Prop",
+            "comments": self.txt_comments.text().strip()
+        }
+
+class POTAPropApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("POTA Hunter")
+        self.setWindowTitle("POTA Prop")
 
         self.resize(1340, 850)
         self.setMinimumSize(980, 600)
@@ -1591,6 +1815,9 @@ class POTAHunterApp(QMainWindow):
         self.hunted_parks: Dict[str, HuntedPark] = {}
         self.active_spots: List[ActiveSpot] = []
         self.compared_spots: List[ComparedSpot] = []
+
+        self.authenticator = POTAAuthenticator()
+        self.authenticator.auth_state_changed.connect(self.on_auth_state_changed)
 
         # Settings, Operator Call, Grid, Station, P2P Mode, and Filters
         settings = QSettings("POTA", "HunterComparator")
@@ -1624,6 +1851,7 @@ class POTAHunterApp(QMainWindow):
         self._last_evaluated_utc_date = today_utc_str
         self.solar_weather = SolarWeather()
         self.lightning_summary: Optional[RegionalLightningSummary] = None
+        self.acknowledged_nws_warnings: set = set()
         self._is_fetching = False
 
         # Auto refresh timer
@@ -1807,7 +2035,7 @@ class POTAHunterApp(QMainWindow):
         # Help Menu
         help_menu = menu_bar.addMenu("&Help")
 
-        about_action = QAction("&About POTA Hunter", self)
+        about_action = QAction("&About POTA Prop", self)
         about_action.setShortcut(QKeySequence("F1"))
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
@@ -1823,6 +2051,12 @@ class POTAHunterApp(QMainWindow):
         pota_web_action.triggered.connect(lambda: webbrowser.open("https://pota.app"))
         help_menu.addAction(pota_web_action)
 
+        help_menu.addSeparator()
+
+        donate_action = QAction("Donate", self)
+        donate_action.triggered.connect(self.show_donate_dialog)
+        help_menu.addAction(donate_action)
+
 
     def autofit_columns(self):
         if hasattr(self, 'table') and self.table:
@@ -1832,8 +2066,19 @@ class POTAHunterApp(QMainWindow):
         dlg = DocumentationDialog(self)
         dlg.exec()
 
+    def show_donate_dialog(self):
+        dlg = DonateDialog(self)
+        dlg.exec()
+
     def show_about_dialog(self):
         dlg = AboutDialog(self)
+        dlg.exec()
+
+    def show_radar_dialog(self):
+        h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
+        if h_lat is None or h_lon is None:
+            h_lat, h_lon = 38.3125, -81.7083
+        dlg = WeatherRadarDialog(home_lat=h_lat, home_lon=h_lon, parent=self)
         dlg.exec()
 
     def show_band_noise_dialog(self):
@@ -1897,7 +2142,7 @@ class POTAHunterApp(QMainWindow):
         layout.setSpacing(10)
 
         # App Title
-        lbl_app = QLabel("POTA Hunter")
+        lbl_app = QLabel("POTA Prop")
         lbl_app.setStyleSheet("color: #f0f6fc; font-size: 16px; font-weight: bold;")
         layout.addWidget(lbl_app)
 
@@ -1922,7 +2167,7 @@ class POTAHunterApp(QMainWindow):
         self.txt_my_call.setPlaceholderText("e.g. W8XYZ")
         self.txt_my_call.setMaxLength(10)
         self.txt_my_call.setFixedWidth(75)
-        self.txt_my_call.setToolTip("Your amateur radio callsign (automatically looks up your QTH grid)")
+        self.txt_my_call.setToolTip("Your amateur radio callsign (automatically looks up your QTH grid for US FCC calls)")
         self.txt_my_call.returnPressed.connect(self.on_my_call_changed)
         self.txt_my_call.editingFinished.connect(self.on_my_call_changed)
         layout.addWidget(self.txt_my_call)
@@ -1984,10 +2229,21 @@ class POTAHunterApp(QMainWindow):
         self.btn_select_csv.clicked.connect(self.browse_csv_file)
         layout.addWidget(self.btn_select_csv)
 
-        btn_reload_csv = QPushButton("Reload Log")
-        btn_reload_csv.setToolTip("Reload active hunter log from disk")
-        btn_reload_csv.clicked.connect(self.reload_csv)
-        layout.addWidget(btn_reload_csv)
+        # Sync Log Button
+        self.btn_sync_log = QPushButton("Sync Log")
+        self.btn_sync_log.setToolTip("Download and sync latest hunted parks from POTA API")
+        self.btn_sync_log.clicked.connect(self.sync_hunter_log)
+        self.btn_sync_log.setEnabled(False) # Will be enabled if logged in
+        layout.addWidget(self.btn_sync_log)
+
+        # Auth Button
+        self.btn_auth = QPushButton("Sign In POTA.app")
+        self.btn_auth.setToolTip("Sign in via AWS Cognito to enable auto-sync and spotting")
+        self.btn_auth.clicked.connect(self.on_auth_clicked)
+        layout.addWidget(self.btn_auth)
+
+        # Initialize UI auth state
+        self.on_auth_state_changed(self.authenticator.is_logged_in())
 
         layout.addStretch()
 
@@ -2032,7 +2288,8 @@ class POTAHunterApp(QMainWindow):
         self.card_lightning = StatCard("Lightning", "1", "#2ea043")
         self.card_noise = StatCard("Band Noise", "40m: S0 | 20m: S0", "#58a6ff", is_clickable=True)
         self.card_noise.clicked.connect(self.show_band_noise_dialog)
-        self.card_weather = StatCard("Local Weather", "--°F", "#58a6ff")
+        self.card_weather = StatCard("Local Weather (Click for Radar)", "--°F", "#58a6ff", is_clickable=True)
+        self.card_weather.clicked.connect(self.show_radar_dialog)
 
         layout.addWidget(self.card_new, stretch=2)
         layout.addWidget(self.card_hunted, stretch=2)
@@ -2191,6 +2448,113 @@ class POTAHunterApp(QMainWindow):
 
         return box
 
+    @pyqtSlot(bool)
+    def on_auth_state_changed(self, logged_in: bool):
+        if logged_in:
+            username = self.authenticator.get_username()
+            btn_text = f"Sign Out ({username})" if username else "Sign Out"
+            self.btn_auth.setText(btn_text)
+            self.btn_auth.setStyleSheet("background-color: #238636; color: #ffffff;")
+            self.btn_sync_log.setEnabled(True)
+            self.status_bar.showMessage("Successfully signed in to POTA.", 5000)
+            # Auto-sync on login
+            self.sync_hunter_log()
+        else:
+            self.btn_auth.setText("Sign In POTA.app")
+            self.btn_auth.setStyleSheet("")
+            self.btn_sync_log.setEnabled(False)
+
+    def on_auth_clicked(self):
+        if self.authenticator.is_logged_in():
+            self.authenticator.logout()
+            self.status_bar.showMessage("Signed out.", 3000)
+        else:
+            self.authenticator.start_login_flow(self)
+
+    def sync_hunter_log(self):
+        token = self.authenticator.get_valid_token()
+        if not token:
+            self.status_bar.showMessage("Error: Not signed in.")
+            return
+            
+        self.btn_sync_log.setEnabled(False)
+        self.btn_sync_log.setText("Syncing...")
+        
+        worker = SyncWorker(token, self.csv_path)
+        worker.signals.finished.connect(self._on_sync_finished)
+        worker.signals.error.connect(self._on_sync_error)
+        self.threadpool.start(worker)
+
+    @pyqtSlot(dict)
+    def _on_sync_finished(self, hunted_map: dict):
+        self.btn_sync_log.setEnabled(True)
+        self.btn_sync_log.setText("Sync Log")
+        
+        if hunted_map:
+            self.hunted_parks = hunted_map
+            self.status_bar.showMessage(f"Sync complete. Found {len(self.hunted_parks)} hunted parks.", 5000)
+            self.recompute_comparisons()
+        else:
+            self.status_bar.showMessage("Sync completed but no parks found or error occurred.", 5000)
+
+    @pyqtSlot(str)
+    def _on_sync_error(self, error: str):
+        self.btn_sync_log.setEnabled(True)
+        self.btn_sync_log.setText("Sync Log")
+        self.status_bar.showMessage(f"Sync failed: {error}", 5000)
+
+    def on_table_context_menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+            
+        row = item.row()
+        
+        # Add spot action
+        spot_action = menu.addAction("Spot Activator / Re-Spot")
+        
+        # Execute menu
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        
+        if action == spot_action:
+            self.open_spot_dialog(row)
+
+    def open_spot_dialog(self, row: int):
+        token = self.authenticator.get_valid_token()
+        if not token:
+            self.status_bar.showMessage("You must be signed in to submit spots.", 3000)
+            
+        # Get spot data from table safely
+        activator_item = self.table.item(row, 2)
+        freq_item = self.table.item(row, 3)
+        ref_item = self.table.item(row, 5)
+        mode_item = self.table.item(row, 9)
+        
+        activator = activator_item.text() if activator_item else ""
+        freq = freq_item.text() if freq_item else ""
+        ref = ref_item.text() if ref_item else ""
+        mode = mode_item.text() if mode_item else ""
+        
+        # Clean up freq if it has MHz
+        freq_raw = freq.split(' ')[0]
+        try:
+            freq_khz = str(float(freq_raw) * 1000)
+        except:
+            freq_khz = freq_raw
+            
+        dialog = SpotDialog(activator, ref, freq_khz, mode, self.my_call, self)
+        if dialog.exec():
+            payload = dialog.get_spot_data()
+            self.status_bar.showMessage(f"Submitting spot for {payload['activator']}...")
+            
+            worker = SpotWorker(payload, token)
+            worker.signals.finished.connect(lambda s: self.status_bar.showMessage("Spot submitted successfully!", 5000))
+            worker.signals.error.connect(lambda e: self.status_bar.showMessage(f"Spot failed: {e}", 5000))
+            self.threadpool.start(worker)
+
     def create_table(self) -> QTableWidget:
         table = QTableWidget()
         table.setColumnCount(13)
@@ -2219,6 +2583,9 @@ class POTAHunterApp(QMainWindow):
         table.setSortingEnabled(True)
         table.verticalHeader().setVisible(False)
         table.setShowGrid(True)
+        
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self.on_table_context_menu)
 
         # Make columns interactively adjustable by dragging header boundaries
         header = table.horizontalHeader()
@@ -2393,7 +2760,7 @@ class POTAHunterApp(QMainWindow):
         start_dir = os.path.dirname(self.csv_path) if os.path.exists(self.csv_path) else os.path.expanduser("~")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select POTA Hunter CSV File",
+            "Select POTA Prop CSV File",
             start_dir,
             "CSV Files (*.csv);;All Files (*)",
         )
@@ -2602,6 +2969,41 @@ class POTAHunterApp(QMainWindow):
             self.startup_lightning_timer.stop()
             self.refresh_lightning_display()
 
+    def _check_nws_warnings(self):
+        """Checks if the user's location is inside any active NWS warnings and triggers popups."""
+        if not self.lightning_summary or not self.lightning_summary.nws_warnings:
+            return
+            
+        home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
+        if home_lat is None or home_lon is None:
+            home_lat, home_lon = 38.3125, -81.7083
+            
+        for w in self.lightning_summary.nws_warnings:
+            if w.headline in self.acknowledged_nws_warnings:
+                continue
+                
+            if w.polygon_coords and point_in_polygon(home_lon, home_lat, w.polygon_coords):
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Icon.Warning)
+                msg.setWindowTitle(f"Active {w.event_type}")
+                
+                expires_str = f"Expires in {w.expires_in_minutes} minutes" if w.expires_in_minutes else "Expiration unknown"
+                
+                text = (
+                    f"<b>{w.event_type}</b><br><br>"
+                    f"{w.headline}<br><br>"
+                    f"<i>{expires_str}</i><br><br>"
+                    f"Your current location is inside the active warning polygon for this weather event."
+                )
+                msg.setText(text)
+                msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+                btn = msg.button(QMessageBox.StandardButton.Ok)
+                if btn:
+                    btn.setText("Acknowledge")
+                msg.exec()
+                
+                self.acknowledged_nws_warnings.add(w.headline)
+
     def refresh_lightning_display(self):
         """
         Lightweight real-time refresh of regional lightning activity,
@@ -2612,6 +3014,7 @@ class POTAHunterApp(QMainWindow):
             home_lat, home_lon = 38.3125, -81.7083
 
         self.lightning_summary = fetch_regional_lightning_summary(home_lat, home_lon, force_refresh=True)
+        self._check_nws_warnings()
 
         # Update Lightning Card & Tooltip
         act = self.lightning_summary.get_activity_level()
@@ -2859,6 +3262,7 @@ class POTAHunterApp(QMainWindow):
                 self.lightning_summary = fetch_regional_lightning_summary(home_lat, home_lon)
             else:
                 self.lightning_summary = RegionalLightningSummary()
+        self._check_nws_warnings()
 
         act = self.lightning_summary.get_activity_level()
         self.card_lightning.set_value(str(act.level))
@@ -3000,30 +3404,34 @@ class POTAHunterApp(QMainWindow):
 
     def build_row_tooltip(self, cs: ComparedSpot) -> str:
         """
-        Builds a comprehensive mouseover tooltip listing nearby re-spots, spot freshness,
+        Builds a comprehensive mouseover HTML tooltip listing nearby re-spots, spot freshness,
         and QSO feasibility. If no nearby re-spots are available, explicitly outputs 'None'.
         """
         lines = []
+        lines.append("<div style='font-family: sans-serif; font-size: 12px; color: #e6edf3; line-height: 1.4; padding: 4px;'>")
 
         # 1. Header: Station, P2P Target, & Park
         if cs.is_p2p_eligible:
-            lines.append(f"P2P TARGET: {cs.spot.activator} @ {cs.spot.reference} - {cs.display_name}")
-            lines.append(f"Park-to-Park Path from {cs.p2p_my_park or 'Field QTH'}")
+            lines.append(f"<div style='font-size: 14px; font-weight: bold; color: #ff7b72; margin-bottom: 2px;'>🎯 P2P TARGET: {cs.spot.activator}</div>")
+            lines.append(f"<div style='color: #8b949e; margin-bottom: 4px;'>{cs.spot.reference} - {cs.display_name}<br>Park-to-Park Path from {cs.p2p_my_park or 'Field QTH'}</div>")
         elif cs.is_p2p_same_park:
-            lines.append(f"SAME PARK ACTIVATOR: {cs.spot.activator} @ {cs.spot.reference} - {cs.display_name}")
+            lines.append(f"<div style='font-size: 14px; font-weight: bold; color: #79c0ff; margin-bottom: 2px;'>🤝 SAME PARK: {cs.spot.activator}</div>")
+            lines.append(f"<div style='color: #8b949e; margin-bottom: 4px;'>{cs.spot.reference} - {cs.display_name}</div>")
         else:
-            lines.append(f"STATION: {cs.spot.activator} @ {cs.spot.reference} - {cs.display_name}")
+            lines.append(f"<div style='font-size: 14px; font-weight: bold; color: #58a6ff; margin-bottom: 2px;'>📻 STATION: {cs.spot.activator}</div>")
+            lines.append(f"<div style='color: #8b949e; margin-bottom: 4px;'>{cs.spot.reference} - {cs.display_name}</div>")
 
         lines.append(
-            f"Frequency: {cs.frequency_mhz_str} | Mode: {cs.spot.mode} | Band: {cs.spot.band}"
+            f"<div style='margin-bottom: 8px;'><b>Freq:</b> <span style='color: #a5d6ff;'>{cs.frequency_mhz_str}</span> | <b>Mode:</b> <span style='color: #a5d6ff;'>{cs.spot.mode}</span> | <b>Band:</b> <span style='color: #a5d6ff;'>{cs.spot.band}</span></div>"
         )
 
         # 2. Spot Freshness & Decay
         exp_info = f" | Expire in ~{cs.expire_mins_remaining}m" if cs.expire_mins_remaining is not None else ""
-        lines.append(f"Spot Freshness: {cs.time_ago_str} ({cs.decay_status}){exp_info}")
+        lines.append(f"<div style='margin-bottom: 8px;'><b>Spot Freshness:</b> {cs.time_ago_str} ({cs.decay_status}){exp_info}</div>")
 
         # 3. RF Score & Propagation Path
         prob = cs.dx_percentage
+        prob_color = "#3fb950" if prob >= 75 else ("#d29922" if prob >= 50 else "#f85149")
         prob_badge = (
             "Exceptional !"
             if prob >= 99
@@ -3043,20 +3451,19 @@ class POTAHunterApp(QMainWindow):
             if cs.propagation
             else "N/A"
         )
-        lines.append(f"RF Score: {prob} ({prob_badge}) | Distance: {dist_info}")
-        lines.append(f"Propagation Path: {path_sum}")
+        lines.append(f"<div style='margin-bottom: 2px;'><b>RF Score:</b> <span style='color: {prob_color}; font-weight: bold;'>{prob} ({prob_badge})</span> | <b>Distance:</b> {dist_info}</div>")
+        lines.append(f"<div style='margin-bottom: 8px;'><b>Propagation Path:</b> <span style='color: #8b949e;'>{path_sum}</span></div>")
 
         # 4. Nearby Re-spots Section
         ev = cs.spot_evidence
         op_land_tag = ev.op_land_desc if (ev and ev.op_land_desc) else "Local Area"
-        lines.append("------------------------------------------")
-        lines.append(f"Nearby Re-spots ({op_land_tag}):")
+        lines.append(f"<hr style='border: 1px solid #30363d; margin: 8px 0;'>")
+        lines.append(f"<div style='margin-bottom: 4px;'><b>Nearby Re-spots ({op_land_tag}):</b></div>")
 
         has_nearby = False
 
         if ev and ev.local_spotters:
             has_nearby = True
-            # Build lookup of raw respots for comments and timestamps
             respot_map = {}
             for r in cs.spot.respots or []:
                 call = str(r.get("spotter") or "").strip().upper()
@@ -3078,49 +3485,50 @@ class POTAHunterApp(QMainWindow):
                     loc_parts.append(f"{int(s.distance_miles)} mi")
                 loc_desc = f" ({', '.join(loc_parts)})" if loc_parts else ""
 
-                comment_desc = f' -- "{comment}"' if comment else ""
-                lines.append(f"  * {s.callsign}{loc_desc}{time_str}{comment_desc}")
+                comment_desc = f" &mdash; <i style='color: #a5d6ff;'>\"{comment}\"</i>" if comment else ""
+                lines.append(f"<div style='margin-left: 8px; margin-bottom: 2px;'>• <b>{s.callsign}</b><span style='color: #8b949e;'>{loc_desc}{time_str}</span>{comment_desc}</div>")
 
         if ev and ev.local_state_mentions:
             if not has_nearby:
                 has_nearby = True
             lines.append(
-                f"  * State Signal Reports in Comments: {', '.join(ev.local_state_mentions)}"
+                f"<div style='margin-left: 8px; margin-bottom: 2px;'>• <b>State Signal Reports:</b> <i style='color: #a5d6ff;'>{', '.join(ev.local_state_mentions)}</i></div>"
             )
 
         if not has_nearby:
-            lines.append("  None")
+            lines.append("<div style='margin-left: 8px; color: #8b949e;'>None</div>")
 
         # 5. Supplemental Intelligence
-        lines.append("------------------------------------------")
+        lines.append(f"<hr style='border: 1px solid #30363d; margin: 8px 0;'>")
         if ev:
             if ev.signal_reports:
-                lines.append(f"Signal Reports: {', '.join(ev.signal_reports)}")
+                lines.append(f"<div style='margin-bottom: 2px;'><b>Signal Reports:</b> {', '.join(ev.signal_reports)}</div>")
             if ev.empirical_boost_pct != 0:
                 sign = "+" if ev.empirical_boost_pct > 0 else ""
-                lines.append(f"Local Evidence Boost: {sign}{ev.empirical_boost_pct}%")
+                lines.append(f"<div style='margin-bottom: 2px;'><b>Local Evidence Boost:</b> <span style='color: #3fb950;'>{sign}{ev.empirical_boost_pct}%</span></div>")
             if len(cs.spot.respots) > 1:
-                lines.append(f"Respots: {len(cs.spot.respots)}")
+                lines.append(f"<div style='margin-bottom: 2px;'><b>Total Respots:</b> {len(cs.spot.respots)}</div>")
 
         if cs.propagation:
             p = cs.propagation
-            gray_tag = " | [Grayline Active: +28%]" if p.is_grayline else ""
+            gray_tag = " | <span style='color: #d29922;'>[Grayline Active: +28%]</span>" if p.is_grayline else ""
             muf_str = format_muf_telemetry(p)
             lines.append(
-                f"Est MUF: {muf_str} | SFI {int(p.solar_info.sfi)}, A-idx {int(p.solar_info.a_index)}, K-idx {int(p.solar_info.k_index)}{gray_tag}"
+                f"<div style='margin-bottom: 2px;'><b>Est MUF:</b> {muf_str} | <b>SFI</b> {int(p.solar_info.sfi)}, <b>A-idx</b> {int(p.solar_info.a_index)}, <b>K-idx</b> {int(p.solar_info.k_index)}{gray_tag}</div>"
             )
             if p.predicted_snr_db is not None:
                 lines.append(
-                    f"Ray Path: {p.ray_mode} (Takeoff {p.takeoff_angle_deg:.1f}°, Loss {p.path_loss_db:.1f} dB) | SNR: {p.predicted_snr_db:+.1f} dB"
+                    f"<div style='margin-bottom: 2px;'><b>Ray Path:</b> <span style='color: #a5d6ff;'>{p.ray_mode}</span> (Takeoff {p.takeoff_angle_deg:.1f}&deg;, Loss {p.path_loss_db:.1f} dB) | <b>Predicted SNR:</b> <span style='color: #3fb950;'>{p.predicted_snr_db:+.1f} dB</span></div>"
                 )
             ant_name = ANTENNA_PRESETS.get(p.antenna_type, {}).get("name", p.antenna_type)
             lines.append(
-                f"Station Link: {p.tx_power_watts:.0f}W | {ant_name} ({p.antenna_gain_dbi:+.1f} dBi @ {p.takeoff_angle_deg:.1f}°) | Link Offset: {p.station_offset_db:+.1f} dB"
+                f"<div style='margin-bottom: 2px; color: #8b949e;'><b>Station Link:</b> {p.tx_power_watts:.0f}W | {ant_name} ({p.antenna_gain_dbi:+.1f} dBi @ {p.takeoff_angle_deg:.1f}&deg;) | Link Offset: {p.station_offset_db:+.1f} dB</div>"
             )
             if p.qrn_surge_db > 0:
-                lines.append(f"⚡ Lightning QRN Surge: +{p.qrn_surge_db:.1f} dB (Local Sferic Noise)")
+                lines.append(f"<div style='margin-bottom: 2px; color: #ff7b72;'><b>⚡ Lightning QRN Surge:</b> +{p.qrn_surge_db:.1f} dB (Local Sferic Noise)</div>")
 
-        return "\n".join(lines)
+        lines.append("</div>")
+        return "".join(lines)
 
     def on_tooltips_toggled(self, checked: bool):
         self.show_tooltips = checked
@@ -3802,9 +4210,16 @@ class POTAHunterApp(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("POTA Hunter")
+    app.setApplicationName("POTA Prop")
+    
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pota_prop.png")
+    app_icon = QIcon(icon_path)
+    app.setWindowIcon(app_icon)
+    app.setDesktopFileName("pota_prop.desktop")
+    
     app.setStyleSheet(DARK_STYLESHEET)
-    window = POTAHunterApp()
+    window = POTAPropApp()
+    window.setWindowIcon(app_icon)
     window.show()
     sys.exit(app.exec())
 

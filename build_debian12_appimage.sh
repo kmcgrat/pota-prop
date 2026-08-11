@@ -12,9 +12,9 @@ rm -rf dist build AppDir *.AppImage
 echo "=== Installing PyInstaller in the virtual environment ==="
 /home/kmcgrat/pyenv/bin/pip install pyinstaller
 
-# 2. Run PyInstaller to bundle the python app into dist/pota-hunter/
+# 2. Run PyInstaller to bundle the python app into dist/pota-prop/
 echo "=== Building standalone folder with PyInstaller ==="
-/home/kmcgrat/pyenv/bin/pyinstaller --noconfirm --clean --windowed --name pota-hunter main.py
+/home/kmcgrat/pyenv/bin/pyinstaller --noconfirm --clean --windowed --name pota-prop main.py
 
 # 3. Download appimagetool if it doesn't exist
 echo "=== Fetching packaging tools ==="
@@ -30,8 +30,8 @@ fi
 cd ..
 
 # 4. Make sure app icon is present
-if [ ! -f "pota_hunter.png" ]; then
-    echo "Error: pota_hunter.png icon not found in workspace root."
+if [ ! -f "pota_prop.png" ]; then
+    echo "Error: pota_prop.png icon not found in workspace root."
     exit 1
 fi
 
@@ -42,13 +42,13 @@ mkdir -p AppDir/usr/share/applications
 mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
 
 # Copy PyInstaller contents
-cp -r dist/pota-hunter/* AppDir/usr/bin/
+cp -r dist/pota-prop/* AppDir/usr/bin/
 
 # Copy desktop and icon metadata files
-cp pota_hunter.desktop AppDir/
-cp pota_hunter.desktop AppDir/usr/share/applications/
-cp pota_hunter.png AppDir/
-cp pota_hunter.png AppDir/usr/share/icons/hicolor/256x256/apps/pota_hunter.png
+cp pota_prop.desktop AppDir/
+cp pota_prop.desktop AppDir/usr/share/applications/
+cp pota_prop.png AppDir/
+cp pota_prop.png AppDir/usr/share/icons/hicolor/256x256/apps/pota_prop.png
 
 # 6. Create custom AppRun script
 echo "=== Creating AppRun entrypoint ==="
@@ -57,7 +57,7 @@ cat > AppDir/AppRun << 'EOF'
 HERE="$(dirname "$(readlink -f "${0}")")"
 
 # Execute the bundled PyInstaller binary with arguments
-exec "$HERE/usr/bin/pota-hunter" "$@"
+exec "$HERE/usr/bin/pota-prop" "$@"
 EOF
 chmod +x AppDir/AppRun
 

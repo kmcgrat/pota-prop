@@ -17,13 +17,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: pota-hunter-linux-x86_64
+            artifact_name: pota-prop-linux-x86_64
           - os: windows-latest
-            artifact_name: pota-hunter-windows-x64
+            artifact_name: pota-prop-windows-x64
           - os: macos-latest
-            artifact_name: pota-hunter-macos-apple-silicon
+            artifact_name: pota-prop-macos-apple-silicon
           - os: macos-15-intel
-            artifact_name: pota-hunter-macos-intel
+            artifact_name: pota-prop-macos-intel
 
     steps:
       - name: Check out repository
@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          pip install pyinstaller pillow
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       # --- Linux Build ---
@@ -55,14 +55,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "pota-hunter" main.py
+          pyinstaller --noconfirm --onedir --windowed --name "pota-prop" --add-data "pota_prop.png:." main.py
           mkdir -p AppDir/usr/bin
-          cp -r dist/pota-hunter/* AppDir/usr/bin/
+          cp -r dist/pota-prop/* AppDir/usr/bin/
 
-          printf "[Desktop Entry]\nName=POTA Hunter\nExec=pota-hunter\nIcon=pota-hunter\nType=Application\nCategories=Utility;\n" > AppDir/pota-hunter.desktop
-          touch AppDir/pota-hunter.png
+          printf "[Desktop Entry]\nName=POTA Prop\nExec=pota-prop\nIcon=pota-prop\nType=Application\nCategories=Utility;\n" > AppDir/pota-prop.desktop
+          touch AppDir/pota-prop.png
 
-          printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "${0}")")"\nexport PATH="${HERE}/usr/bin:${PATH}"\nexport LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"\nexport QT_QPA_PLATFORM=xcb\nexec "${HERE}/usr/bin/pota-hunter" "$@"\n' > AppDir/AppRun
+          printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "${0}")")"\nexport PATH="${HERE}/usr/bin:${PATH}"\nexport LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"\nexport QT_QPA_PLATFORM=xcb\nexec "${HERE}/usr/bin/pota-prop" "$@"\n' > AppDir/AppRun
           chmod +x AppDir/AppRun
 
           wget -O appimagetool-x86_64.AppImage https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
@@ -74,16 +74,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "pota-hunter" main.py
+          pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.png" --add-data "pota_prop.png;." main.py
 
       # --- macOS Build ---
       - name: Build macOS App Bundle
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "pota-hunter" main.py
+          pyinstaller --noconfirm --onedir --windowed --name "pota-prop" --icon "pota_prop.png" --add-data "pota_prop.png:." main.py
           cd dist
-          zip -r pota-hunter-mac.zip pota-hunter.app
+          zip -r pota-prop-mac.zip pota-prop.app
 
       # --- Artifact Uploads ---
       - name: Upload Linux Artifact
@@ -98,11 +98,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/pota-hunter.exe
+          path: dist/pota-prop.exe
 
       - name: Upload macOS Artifact
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/pota-hunter-mac.zip
+          path: dist/pota-prop-mac.zip

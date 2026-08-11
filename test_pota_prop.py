@@ -372,8 +372,8 @@ class TestPOTAComparatorGUIHeadless(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication(sys.argv)
 
     def test_gui_initialization_and_filtering(self):
-        from pota_hunter import POTAHunterApp
-        window = POTAHunterApp()
+        from pota_prop import POTAPropApp
+        window = POTAPropApp()
         self.assertIsNotNone(window)
         if not window.hunted_parks:
             window.hunted_parks = {
@@ -436,8 +436,8 @@ class TestPOTAComparatorGUIHeadless(unittest.TestCase):
         window.close()
 
     def test_manually_worked_park_tracking(self):
-        from pota_hunter import POTAHunterApp
-        window = POTAHunterApp()
+        from pota_prop import POTAPropApp
+        window = POTAPropApp()
 
         # Mock active spot
         mock_spot = ActiveSpot(
@@ -473,8 +473,8 @@ class TestPOTAComparatorGUIHeadless(unittest.TestCase):
         window.close()
 
     def test_filter_menu_persistence(self):
-        from pota_hunter import POTAHunterApp
-        window1 = POTAHunterApp()
+        from pota_prop import POTAPropApp
+        window1 = POTAPropApp()
 
         # Set specific filters
         idx_band = window1.combo_band.findText("20m")
@@ -495,7 +495,7 @@ class TestPOTAComparatorGUIHeadless(unittest.TestCase):
         window1.close()
 
         # Open new instance to test QSettings restoration
-        window2 = POTAHunterApp()
+        window2 = POTAPropApp()
         self.assertEqual(window2.combo_band.currentText(), "20m")
         self.assertEqual(window2.combo_mode.currentText(), "CW")
         self.assertEqual(window2.combo_status.currentIndex(), 0)  # Always defaults to 'All' (0) on startup
@@ -855,12 +855,12 @@ class TestStationPropagationModeling(unittest.TestCase):
         self.assertIn("Disconnect", html)
 
     def test_gui_lightning_card_telemetry(self):
-        from pota_hunter import POTAHunterApp
+        from pota_prop import POTAPropApp
         from lightning_engine import RegionalLightningSummary, StormCell
         from propagation_engine import SolarWeather
         from data_engine import ActiveSpot
 
-        window = POTAHunterApp()
+        window = POTAPropApp()
         self.assertIsNotNone(window.card_lightning)
         self.assertEqual(window.card_lightning.lbl_title.text(), "LIGHTNING")
         self.assertIn(window.card_lightning.lbl_value.text(), [str(i) for i in range(1, 11)])

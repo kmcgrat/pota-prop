@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
+
 from propagation_engine import (
     DEFAULT_ANTENNA_TYPE,
     DEFAULT_HOME_GRID,
@@ -27,6 +29,8 @@ from propagation_engine import (
     latlon_to_maidenhead,
     maidenhead_to_latlon,
     parse_spot_evidence,
+    build_regional_path_matrix,
+    extract_state_from_location,
 )
 from lightning_engine import fetch_regional_lightning_summary, RegionalLightningSummary
 import concurrent.futures
@@ -680,6 +684,16 @@ def compare_active_spots(
     if not spots:
         return []
 
+    # Build the RegionalPathMatrix
+    regional_matrix = build_regional_path_matrix(
+        spots=spots,
+        home_lat=home_lat,
+        home_lon=home_lon,
+        op_call=op_call,
+        user_grid=effective_grid,
+        resolver=resolver,
+    )
+
     def evaluate_spot(spot: ActiveSpot) -> ComparedSpot:
         hunted = hunted_map.get(spot.reference)
         is_new = (hunted is None or hunted.qsos == 0)
@@ -730,6 +744,8 @@ def compare_active_spots(
             antenna_type=antenna_type,
             is_same_park=is_same_park,
             lightning_summary=lightning_summary,
+            regional_matrix=regional_matrix,
+            target_state=extract_state_from_location(spot.location_desc or ""),
         )
 
         return ComparedSpot(
@@ -848,4 +864,101 @@ def fetch_park_info(
     except Exception as e:
         logger.debug(f"Failed to lookup park {ref} from POTA API: {e}")
         return None
+
+
+def fetch_hunter_parks_from_api(id_token: str, save_csv_path: Optional[str] = None) -> Dict[str, HuntedPark]:
+    """
+    Fetches the authenticated user's hunted parks from the POTA API.
+    Optionally saves the fetched data as a CSV file to emulate the manual export.
+    Returns a dictionary mapped by normalized Reference.
+    """
+    url = "https://api.pota.app/user/stats/hunter/park"
+    headers = {
+        "Authorization": id_token,
+        "Accept": "application/json"
+    }
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        hunted_map: Dict[str, HuntedPark] = {}
+        csv_rows = []
+        
+        for item in data:
+            ref = str(item.get("reference") or "").strip()
+            norm = normalize_ref(ref)
+            if not norm:
+                continue
+                
+            name = str(item.get("park") or "").strip()
+            loc = str(item.get("location") or "").strip()
+            dx = str(item.get("entity") or "").strip()
+            hasc = str(item.get("short") or "").strip()
+            first_qso = str(item.get("first") or "").strip()
+            qsos = int(item.get("qsos") or 1)
+            
+            if norm in hunted_map:
+                hunted_map[norm].qsos += qsos
+            else:
+                hunted_map[norm] = HuntedPark(
+                    reference=norm,
+                    park_name=name,
+                    location=loc,
+                    dx_entity=dx,
+                    hasc=hasc,
+                    first_qso_date=first_qso,
+                    qsos=qsos,
+                )
+            
+            # Format for CSV export: "DX Entity","Location","HASC","Reference","Park Name","First QSO Date","QSOs"
+            csv_rows.append({
+                "DX Entity": dx,
+                "Location": loc,
+                "HASC": hasc,
+                "Reference": norm,
+                "Park Name": name,
+                "First QSO Date": first_qso,
+                "QSOs": str(qsos)
+            })
+            
+        if save_csv_path and csv_rows:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(save_csv_path)), exist_ok=True)
+                with open(save_csv_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
+                    fieldnames = ["DX Entity", "Location", "HASC", "Reference", "Park Name", "First QSO Date", "QSOs"]
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(csv_rows)
+            except Exception as e:
+                logger.error(f"Failed to save fetched hunter parks to CSV: {e}")
+                
+        return hunted_map
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch hunter parks from API: {e}")
+        return {}
+
+
+def submit_spot_to_api(payload: dict, id_token: Optional[str] = None) -> bool:
+    """
+    Submits a spot to the POTA API.
+    Payload should match the required fields: activator, spotter, frequency, reference, mode, etc.
+    """
+    url = "https://api.pota.app/spot"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    if id_token:
+        headers["Authorization"] = id_token
+        
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to submit spot to API: {e}")
+        return False
+
 

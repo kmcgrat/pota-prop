@@ -69,6 +69,7 @@ class HourlyForecastItem:
     """Represents a single hour forecast element."""
     dt_utc: datetime
     temp_f: float
+    precip_prob: int
     weather_code: int
     weather_desc: str
     weather_icon: str
@@ -146,6 +147,7 @@ class WeatherForecastSummary:
                 "<tr style='color: #8b949e; border-bottom: 1px solid #30363d;'>"
                 "<th style='text-align: left; padding: 2px 8px 2px 0;'>Time (UTC)</th>"
                 "<th style='text-align: left; padding: 2px 8px;'>Temp</th>"
+                "<th style='text-align: left; padding: 2px 8px;'>Precip</th>"
                 "<th style='text-align: left; padding: 2px 8px;'>Condition</th>"
                 "<th style='text-align: left; padding: 2px 0;'>Wind</th>"
                 "</tr>"
@@ -155,6 +157,7 @@ class WeatherForecastSummary:
                     f"<tr>"
                     f"<td style='padding: 2px 8px 2px 0; color: #8b949e;'>{item.time_display}</td>"
                     f"<td style='padding: 2px 8px; color: #7ee787; font-weight: bold;'>{int(round(item.temp_f))}°F</td>"
+                    f"<td style='padding: 2px 8px; color: #58a6ff;'>{item.precip_prob}%</td>"
                     f"<td style='padding: 2px 8px;'>{item.weather_icon} {item.weather_desc}</td>"
                     f"<td style='padding: 2px 0; color: #c9d1d9;'>{int(round(item.wind_speed_mph))} mph {item.wind_dir_cardinal}</td>"
                     f"</tr>"
@@ -233,7 +236,7 @@ class WeatherEngine:
             "latitude": f"{lat:.4f}",
             "longitude": f"{lon:.4f}",
             "current": "temperature_2m,weather_code,wind_speed_10m,wind_direction_10m",
-            "hourly": "temperature_2m,weather_code,wind_speed_10m,wind_direction_10m",
+            "hourly": "temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m",
             "forecast_hours": "16",  # fetch slightly more to slice next 12 hours from current time
             "temperature_unit": "fahrenheit",
             "wind_speed_unit": "mph",
@@ -275,6 +278,7 @@ class WeatherEngine:
                         h_data = data["hourly"]
                         times = h_data.get("time", [])
                         temps = h_data.get("temperature_2m", [])
+                        precips = h_data.get("precipitation_probability", [])
                         codes = h_data.get("weather_code", [])
                         speeds = h_data.get("wind_speed_10m", [])
                         dirs = h_data.get("wind_direction_10m", [])
@@ -293,10 +297,12 @@ class WeatherEngine:
                             if dt_item >= now_utc or (now_utc - dt_item).total_seconds() < 3600:
                                 desc, icon, _ = get_wmo_info(int(codes[i]))
                                 w_cardinal = degrees_to_cardinal(float(dirs[i]))
+                                precip_val = int(precips[i]) if i < len(precips) else 0
                                 items.append(
                                     HourlyForecastItem(
                                         dt_utc=dt_item,
                                         temp_f=float(temps[i]),
+                                        precip_prob=precip_val,
                                         weather_code=int(codes[i]),
                                         weather_desc=desc,
                                         weather_icon=icon,

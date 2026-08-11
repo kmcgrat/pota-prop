@@ -327,6 +327,13 @@ class SpotEvidence:
     op_land_desc: str = "8-Land / Near WV"
     is_qrt: bool = False
     has_psk_reporter_decode: bool = False
+    regional_boost: int = 0
+    regional_summary: str = ""
+
+
+@dataclass
+class RegionalPathMatrix:
+    openings: Dict[Tuple[str, str], List[Tuple[float, str]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -616,17 +623,38 @@ def resolve_operator_location_context(
         call_district = US_STATE_CALL_DISTRICT[state]
 
     if not call_district and user_call:
-        m = re.search(r"[AKNW][A-Z]?(\d)", user_call.upper())
+        m = re.search(r"^[AKNW][A-Z]?(\d)", user_call.upper())
         if m:
             call_district = m.group(1)
 
-    if not call_district:
-        call_district = "8"
-    if not state:
-        state = "WV" if call_district == "8" else "US"
+    is_us = bool(call_district) or (state in US_STATE_CALL_DISTRICT)
 
-    land_name = f"{call_district}-Land" if call_district in "0123456789" else f"{call_district}"
-    op_land_desc = f"{land_name} / Near {state}"
+    if not is_us and user_call:
+        from data_engine import POTA_PREFIX_TO_COUNTRY
+        country = None
+        clean_call = user_call.upper().strip()
+        for i in range(len(clean_call), 0, -1):
+            if clean_call[:i] in POTA_PREFIX_TO_COUNTRY:
+                country = POTA_PREFIX_TO_COUNTRY[clean_call[:i]]
+                break
+        
+        if country:
+            if not state: state = country
+            call_district = country
+            land_name = country
+            op_land_desc = f"{country} / Near {grid[:4] if grid else country}"
+        else:
+            if not state: state = "DX"
+            call_district = "DX"
+            land_name = "DX"
+            op_land_desc = f"DX / Near {grid[:4] if grid else 'DX'}"
+    else:
+        if not call_district:
+            call_district = "8"
+        if not state:
+            state = "WV" if call_district == "8" else "US"
+        land_name = f"{call_district}-Land" if call_district in "0123456789" else f"{call_district}"
+        op_land_desc = f"{land_name} / Near {state}"
     neighbors = US_STATE_NEIGHBORS.get(state, set())
 
     return {
@@ -678,7 +706,7 @@ class CallsignResolver:
         if not call:
             return False
         clean = call.strip().upper().split("/")[0].split("-")[0]
-        return bool(re.match(r"^[AKNW][A-Z]?[834][A-Z]{1,4}$", clean))
+        return bool(re.match(r"^[AKNW][A-Z]?\d[A-Z]{1,4}$", clean))
 
     def resolve(
         self,
@@ -735,9 +763,20 @@ class CallsignResolver:
                 logger.debug(f"Callsign lookup failed for {call}: {e}")
 
         if cached is None:
-            m = re.search(r"[AKNW][A-Z]?(\d)", call)
-            call_area = m.group(1) if m else None
-            state_val = f"{call_area}-Land" if call_area else None
+            state_val = None
+            if self.is_candidate_local_call(call):
+                m = re.search(r"^[AKNW][A-Z]?(\d)", call)
+                call_area = m.group(1) if m else None
+                state_val = f"{call_area}-Land" if call_area else None
+            else:
+                from data_engine import POTA_PREFIX_TO_COUNTRY
+                for i in range(len(call), 0, -1):
+                    if call[:i] in POTA_PREFIX_TO_COUNTRY:
+                        state_val = POTA_PREFIX_TO_COUNTRY[call[:i]]
+                        break
+                if not state_val:
+                    state_val = "DX"
+                    
             cached = {"state": state_val, "grid": None, "latitude": None, "longitude": None, "name": None}
 
         state = cached.get("state")
@@ -1139,6 +1178,61 @@ def is_self_spot(spotter_call: str, activator_call: str) -> bool:
     return bool(base_spotter and base_activator and base_spotter == base_activator)
 
 
+def extract_state_from_location(loc_desc: str) -> str:
+    if not loc_desc:
+        return ""
+    parts = loc_desc.split("-")
+    if len(parts) >= 2 and parts[0] == "US":
+        return parts[1].upper()
+    return loc_desc.upper()
+
+
+def build_regional_path_matrix(
+    spots: List[Any],
+    home_lat: float,
+    home_lon: float,
+    op_call: str,
+    user_grid: str,
+    resolver: CallsignResolver,
+) -> RegionalPathMatrix:
+    matrix = RegionalPathMatrix()
+    
+    op_context = resolve_operator_location_context(
+        home_lat=home_lat, home_lon=home_lon, user_call=op_call, grid=user_grid, resolver=resolver
+    )
+    
+    for spot in spots:
+        tgt_state = extract_state_from_location(getattr(spot, "location_desc", ""))
+        band = getattr(spot, "band", "")
+        mode = getattr(spot, "mode", "")
+        
+        if not tgt_state or not band:
+            continue
+            
+        all_respots = list(getattr(spot, "respots", []) or [])
+        comments = getattr(spot, "comments", "")
+        if comments:
+            has_main = any(str(r.get("comments") or "").strip() == comments for r in all_respots)
+            if not has_main:
+                all_respots.append({"spotter": getattr(spot, "spotter", ""), "comments": comments})
+                
+        for r in all_respots:
+            spt = r.get("spotter")
+            if not spt:
+                continue
+            if is_self_spot(spt, getattr(spot, "activator", "")):
+                continue
+            
+            loc = resolver.resolve(spt, home_lat=home_lat, home_lon=home_lon, op_context=op_context)
+            if loc.is_local_area and loc.distance_miles is not None:
+                key = (band.upper(), tgt_state)
+                if key not in matrix.openings:
+                    matrix.openings[key] = []
+                matrix.openings[key].append((loc.distance_miles, mode.upper()))
+                
+    return matrix
+
+
 def parse_spot_evidence(
     respots: List[dict],
     home_lat: float,
@@ -1201,8 +1295,15 @@ def parse_spot_evidence(
         "CO": ["CO", "COLORADO", "DENVER"],
         "WA": ["WA", "WASH", "WASHINGTON", "SEATTLE"],
     }
-    state_tokens = state_names_map.get(op_state_code, [op_state_code])
-    state_pattern = re.compile(r"\b(" + "|".join(re.escape(t) for t in state_tokens) + r")\b", re.IGNORECASE)
+    if op_state_code in ["DX", "Intl", "US"]:
+        state_tokens = []
+    else:
+        state_tokens = state_names_map.get(op_state_code, [op_state_code])
+        
+    if state_tokens:
+        state_pattern = re.compile(r"\b(" + "|".join(re.escape(t) for t in state_tokens) + r")\b", re.IGNORECASE)
+    else:
+        state_pattern = None
 
     neighbor_tokens = list(op_neighbors)
     neighbor_tokens.append(f"{op_land}-LAND")
@@ -1283,7 +1384,7 @@ def parse_spot_evidence(
             if psk_pattern.search(comment):
                 has_psk_reporter_decode = True
 
-            if state_pattern.search(comment):
+            if state_pattern and state_pattern.search(comment):
                 has_state_mention = True
                 local_state_mentions.append(f"{op_state_code} ({comment})")
             elif neighbor_pattern.search(comment):
@@ -1743,6 +1844,8 @@ def calculate_qso_probability(
     antenna_type: str = DEFAULT_ANTENNA_TYPE,
     is_same_park: bool = False,
     lightning_summary: Optional[Any] = None,
+    regional_matrix: Optional[RegionalPathMatrix] = None,
+    target_state: str = "",
 ) -> PropagationResult:
     """
     Calculates Circuit Reliability, SNR, multi-hop ray tracing,
@@ -1851,6 +1954,41 @@ def calculate_qso_probability(
             qrn_surge_db=0.0,
             lightning_summary=lightning_summary,
         )
+
+    # 1b. Check RegionalPathMatrix for fuzzy logic multi-mode openings
+    regional_boost = 0
+    regional_summary = ""
+    if regional_matrix and target_state:
+        key = (band.upper(), target_state)
+        if key in regional_matrix.openings:
+            openings = regional_matrix.openings[key]
+            # Find the best opening
+            best_dist = min([o[0] for o in openings])
+            best_modes = [o[1] for o in openings if o[0] == best_dist]
+            
+            # Determine if the opening was created by a weak signal mode
+            weak_modes = {"FT8", "FT4", "JS8", "WSPR", "CW", "JT65"}
+            opened_by_weak = all(m in weak_modes for m in best_modes)
+            target_is_voice = clean_mode in {"SSB", "FM", "AM"}
+            
+            if best_dist <= 200:
+                if opened_by_weak and target_is_voice:
+                    regional_boost = 8
+                    regional_summary = f"{band} path to {target_state} confirmed open by local FT8/CW spotters"
+                else:
+                    regional_boost = 15
+                    regional_summary = f"{band} path to {target_state} confirmed open by local spotters"
+            elif best_dist <= 400:
+                if opened_by_weak and target_is_voice:
+                    regional_boost = 5
+                else:
+                    regional_boost = 10
+                    regional_summary = f"{band} path to {target_state} confirmed open regionally"
+                    
+    # Inject regional boost into evidence
+    if spot_evidence and regional_boost > 0:
+        spot_evidence.regional_boost = regional_boost
+        spot_evidence.regional_summary = regional_summary
 
     mid_lat, mid_lon = calculate_midpoint(home_lat, home_lon, t_lat, t_lon)
 
@@ -1962,8 +2100,14 @@ def calculate_qso_probability(
             summary = "6m Band Closed (No Es Opening Detected)"
             r_mode = "Closed / Penetration"
 
-        if spot_evidence and spot_evidence.empirical_boost_pct != 0:
-            prob = max(5, min(95, prob + spot_evidence.empirical_boost_pct))
+        if spot_evidence:
+            total_empirical_boost = spot_evidence.empirical_boost_pct + spot_evidence.regional_boost
+            prob = max(1, min(99, prob + total_empirical_boost))
+            # If we have a regional summary but no specific evidence summary, use it
+            if not spot_evidence.evidence_summary and spot_evidence.regional_summary:
+                spot_evidence.evidence_summary = spot_evidence.regional_summary
+            elif spot_evidence.evidence_summary and spot_evidence.regional_summary:
+                spot_evidence.evidence_summary += f" • {spot_evidence.regional_summary}"
 
         if prob > 0:
             sixm_boost = max(-15.0, min(15.0, station_offset_db * 0.75))
@@ -2185,11 +2329,15 @@ def calculate_qso_probability(
         raw_rel_pct = max(5.0, raw_rel_pct - storm_sub)
 
     # I. Spot Evidence Fusion
-    empirical_boost = 0.0
-    if spot_evidence and spot_evidence.empirical_boost_pct != 0:
-        empirical_boost = float(spot_evidence.empirical_boost_pct)
+    if spot_evidence:
+        total_empirical_boost = spot_evidence.empirical_boost_pct + spot_evidence.regional_boost
+        raw_rel_pct = max(1.0, min(99.0, raw_rel_pct + float(total_empirical_boost)))
+        if not spot_evidence.evidence_summary and spot_evidence.regional_summary:
+            spot_evidence.evidence_summary = spot_evidence.regional_summary
+        elif spot_evidence.evidence_summary and spot_evidence.regional_summary:
+            spot_evidence.evidence_summary += f" • {spot_evidence.regional_summary}"
 
-    final_prob = int(round(raw_rel_pct + empirical_boost))
+    final_prob = int(round(raw_rel_pct))
     final_prob = max(0, min(100, final_prob))
 
     # QRT override
@@ -2335,7 +2483,8 @@ def compute_band_noise_matrix(
 
         # 6. Receiver Noise Power in Bandwidth (dBm)
         # Thermal noise floor kTB = -174 dBm/Hz + 10*log10(BW) + Fa
-        noise_power_dbm = -174.0 + 10.0 * math.log10(bandwidth_hz) + f_a_total
+        # Subtracting 3.0 dB for assumed typical feedline/system loss
+        noise_power_dbm = -174.0 + 10.0 * math.log10(bandwidth_hz) + f_a_total - 3.0
 
         # 7. S-Unit calculation (IARU HF standard: S9 = -73 dBm, S0 = -127 dBm, 6 dB/S-unit)
         s_val = (noise_power_dbm - (-127.0)) / 6.0
