@@ -73,19 +73,8 @@ jobs:
           pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.png" --add-data "pota_prop.png;." main.py
 
       # --- Artifact Uploads ---
-      - name: Upload Linux Artifact
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: POTA_Hunter-x86_64.AppImage
-
-      - name: Upload Windows Artifact
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/pota-prop.exe
+      # Removed actions/upload-artifact steps to save storage quota. 
+      # Binaries are now published directly to GitHub Releases below.
 
       # --- GitHub Release ---
       - name: Publish Linux Release
