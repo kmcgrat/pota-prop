@@ -54,7 +54,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "pota-prop" --add-data "pota_prop.png:." main.py
+          pyinstaller --noconfirm --onedir --windowed --name "pota-prop" --add-data "pota_prop.png:." --add-data "map.html:." main.py
           mkdir -p AppDir/usr/bin
           cp -r dist/pota-prop/* AppDir/usr/bin/
 
@@ -73,7 +73,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.png" --add-data "pota_prop.png;." main.py
+          pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.png" --add-data "pota_prop.png;." --add-data "map.html;." main.py
 
       # --- Artifact Uploads ---
       # Removed actions/upload-artifact steps to save storage quota. 

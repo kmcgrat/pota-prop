@@ -18,6 +18,11 @@ from typing import Dict, List, Optional, Tuple
 
 APP_VERSION = "26.8.14-rc1"
 
+def get_resource_path(relative_path):
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+
 
 from PyQt6.QtCore import (
     QObject,
@@ -2435,7 +2440,7 @@ class MapWindow(QMainWindow):
         self.channel.registerObject("backend", self.backend)
         self.web_view.page().setWebChannel(self.channel)
 
-        map_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "map.html"))
+        map_path = get_resource_path("map.html")
         self.web_view.setUrl(QUrl.fromLocalFile(map_path))
         self.parent_app = parent
         self.backend.filterChanged.connect(self.on_filter_changed)
@@ -5316,7 +5321,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("POTA Prop")
     
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pota_prop.png")
+    icon_path = get_resource_path("pota_prop.png")
     app_icon = QIcon(icon_path)
     app.setWindowIcon(app_icon)
     app.setDesktopFileName("pota_prop.desktop")
