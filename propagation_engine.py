@@ -14,6 +14,7 @@ import re
 import threading
 import urllib.request
 from dataclasses import dataclass, field
+from meteor_engine import MeteorActivity, get_current_meteor_activity
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -40,6 +41,7 @@ class SolarWeather:
     condition: str = "Normal"   # Quiet, Unsettled, Active, Minor Storm, Major Storm
     updated_at: str = "Cached"
     source: str = "NOAA SWPC / GOES"
+    meteor_activity: Optional[MeteorActivity] = None
 
     @property
     def storm_condition(self) -> str:
@@ -247,7 +249,7 @@ class SolarWeather:
         lines.append("<div style='font-family: sans-serif; font-size: 12px; color: #e6edf3; line-height: 1.4;'>")
         lines.append(
             f"<div style='font-size: 14px; font-weight: bold; color: {ov_col}; margin-bottom: 6px;'>"
-            f"☀️ NOAA Space Weather & Ionospheric Conditions: {ov_lbl}</div>"
+            f"NOAA Space Weather & Ionospheric Conditions: {ov_lbl}</div>"
         )
         lines.append(f"<div style='color: #8b949e; margin-bottom: 8px;'>{ov_guid}</div>")
 
@@ -310,6 +312,9 @@ class CallsignLocation:
     name: Optional[str] = None
     distance_miles: Optional[float] = None
     is_local_area: bool = False
+    method: str = "POTA Spot"
+    snr: Optional[float] = None
+    age_mins: Optional[float] = None
 
 
 @dataclass
@@ -333,7 +338,7 @@ class SpotEvidence:
 
 @dataclass
 class RegionalPathMatrix:
-    openings: Dict[Tuple[str, str], List[Tuple[float, str]]] = field(default_factory=dict)
+    openings: Dict[Tuple[str, str], List[Tuple[float, str, Optional[float], bool]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -362,6 +367,8 @@ class PropagationResult:
     noise_floor_dbw: float = -140.0
     qrn_surge_db: float = 0.0
     lightning_summary: Optional[Any] = None
+    profile: Optional['IonosphericProfile'] = None
+    ray_candidate: Optional['RayHopCandidate'] = None
 
 
 @dataclass
@@ -391,7 +398,7 @@ DEFAULT_ANTENNA_TYPE = "EFHW"
 ANTENNA_PRESETS: Dict[str, Dict[str, Any]] = {
     "EFHW": {
         "key": "EFHW",
-        "name": "EFHW (End-Fed Half-Wave)",
+        "name": "EFHW",
         "hf_gain_db": 2.5,
         "vhf_gain_db": 1.5,
         "nvis_gain_db": 3.8,
@@ -797,21 +804,19 @@ class CallsignResolver:
         is_local = False
         op_state = op_context.get("state") if op_context else "WV"
         op_land = op_context.get("call_district") if op_context else "8"
-        op_neighbors = op_context.get("neighbors") if op_context else {"OH", "VA", "PA", "KY", "MD", "NC"}
 
-        m_call = re.search(r"[AKNW][A-Z]?(\d)", call)
+        m_call = re.search(r"^[AKNW][A-Z]?(\d)", call)
         call_district = m_call.group(1) if m_call else None
 
-        if state and op_state and state == op_state:
-            is_local = True
-        elif state and op_land and state == f"{op_land}-Land":
-            is_local = True
-        elif call_district and op_land and call_district == op_land:
-            is_local = True
-        elif dist_mi is not None and dist_mi <= 250.0:
-            is_local = True
-        elif state and op_neighbors and state in op_neighbors and (dist_mi is None or dist_mi <= 375.0):
-            is_local = True
+        if dist_mi is not None:
+            if dist_mi <= 200.0:
+                is_local = True
+        else:
+            # Fallback heuristics if distance is unknown
+            if state and op_state and state == op_state:
+                is_local = True
+            elif call_district and op_land and call_district == op_land:
+                is_local = True
 
         return CallsignLocation(
             callsign=call,
@@ -1136,6 +1141,7 @@ def fetch_live_solar_weather(timeout: int = 5, force: bool = False, max_age_seco
     if flare_penalty < 0:
         cond = f"{r_scale} ({xray_class} Flare)"
 
+    meteor = get_current_meteor_activity(now)
     res = SolarWeather(
         sfi=sfi,
         k_index=k_index,
@@ -1147,6 +1153,7 @@ def fetch_live_solar_weather(timeout: int = 5, force: bool = False, max_age_seco
         condition=cond,
         updated_at=updated,
         source="NOAA SWPC / GOES",
+        meteor_activity=meteor,
     )
 
     _SOLAR_CACHE_TIME = now
@@ -1226,10 +1233,48 @@ def build_regional_path_matrix(
             loc = resolver.resolve(spt, home_lat=home_lat, home_lon=home_lon, op_context=op_context)
             if loc.is_local_area and loc.distance_miles is not None:
                 key = (band.upper(), tgt_state)
-                if key not in matrix.openings:
-                    matrix.openings[key] = []
-                matrix.openings[key].append((loc.distance_miles, mode.upper()))
+                matrix.openings.setdefault(key, []).append((loc.distance_miles, mode.upper(), None, False))
                 
+    return matrix
+
+
+def inject_psk_spots(matrix: RegionalPathMatrix, psk_spots: List['DigitalSpot']):
+    """
+    Ingests live PSKReporter telemetry into the RegionalPathMatrix.
+    
+    This function tracks the highest SNR achieved per region/band across all 
+    network decodes. This allows the scoring engine to implement Mode Penalty Logic, 
+    where exceptionally strong FT8 decodes can empirically prove SSB/CW viability,
+    while weak decodes only prove digital viability.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    for spot in psk_spots:
+        if not spot.tx_grid or len(spot.tx_grid) < 2:
+            continue
+            
+        grid2 = spot.tx_grid[:2].upper()
+        # Approximate age
+        age = (now - spot.time_utc).total_seconds() / 60.0
+        if age < 0: age = 0.0
+        
+        # band string based on freq
+        freq = spot.freq_mhz
+        if 1.8 <= freq <= 2.0: band = "160m"
+        elif 3.5 <= freq <= 4.0: band = "80m"
+        elif 5.3 <= freq <= 5.4: band = "60m"
+        elif 7.0 <= freq <= 7.3: band = "40m"
+        elif 10.1 <= freq <= 10.2: band = "30m"
+        elif 14.0 <= freq <= 14.35: band = "20m"
+        elif 18.068 <= freq <= 18.168: band = "17m"
+        elif 21.0 <= freq <= 21.45: band = "15m"
+        elif 24.89 <= freq <= 24.99: band = "12m"
+        elif 28.0 <= freq <= 29.7: band = "10m"
+        elif 50.0 <= freq <= 54.0: band = "6m"
+        else: continue
+        
+        matrix.openings.setdefault((band, grid2), []).append((age, spot.mode, spot.snr, True))
+        
     return matrix
 
 
@@ -1242,6 +1287,7 @@ def parse_spot_evidence(
     user_grid: str = "",
     resolver: Optional[CallsignResolver] = None,
     dt_utc: Optional[datetime] = None,
+    psk_spots: Optional[List[Any]] = None,
 ) -> SpotEvidence:
     if resolver is None:
         resolver = CallsignResolver()
@@ -1344,7 +1390,7 @@ def parse_spot_evidence(
 
         # 1. ALWAYS check comments for QRT indicators (self-spot or hunter-spot)
         if comment:
-            if qrt_pattern.search(comment):
+            if qrt_pattern.search(comment.upper()):
                 is_qrt = True
 
         # 2. Check if this is an activator self-spot
@@ -1375,6 +1421,24 @@ def parse_spot_evidence(
             seen_spotters.add(spotter.upper())
             spotters.append(spotter)
             loc = resolver.resolve(spotter, home_lat=home_lat, home_lon=home_lon, op_context=op_context)
+            
+            spot_method = "POTA Respot"
+            spot_snr = None
+            if comment:
+                if psk_pattern.search(comment):
+                    spot_method = "PSKReporter (POTA Respot)"
+                
+                rbn_m = rbn_pattern.search(comment)
+                if rbn_m:
+                    spot_method = "RBN Node"
+                    try:
+                        spot_snr = float(rbn_m.group(1))
+                    except ValueError:
+                        pass
+                        
+            loc.method = spot_method
+            loc.snr = spot_snr
+
             if loc.is_local_area:
                 local_spotters.append(loc)
 
@@ -1409,6 +1473,43 @@ def parse_spot_evidence(
 
             if neg_pattern.search(comment):
                 has_negative_sig = True
+
+    # 4. Integrate raw PSKReporter telemetry for this activator
+    if psk_spots and activator_call:
+        for spot in psk_spots:
+            if spot.tx_call.upper() == activator_call.upper() and spot.rx_call:
+                rx_call = spot.rx_call.upper()
+                if rx_call not in seen_spotters:
+                    seen_spotters.add(rx_call)
+                    
+                    dist_mi = None
+                    is_local = False
+                    
+                    if getattr(spot, 'rx_grid', None) and home_lat is not None and home_lon is not None:
+                        r_lat, r_lon = maidenhead_to_latlon(spot.rx_grid)
+                        if r_lat is not None and r_lon is not None:
+                            d_km, _ = calculate_distance_and_bearing(home_lat, home_lon, r_lat, r_lon)
+                            dist_mi = d_km * 0.621371
+                            if dist_mi <= 200.0:
+                                is_local = True
+                    
+                    if is_local:
+                        loc = CallsignLocation(
+                            callsign=rx_call,
+                            grid=spot.rx_grid,
+                            distance_miles=dist_mi,
+                            is_local_area=True,
+                            method="PSKReporter (FT8/FT4)",
+                            snr=spot.snr
+                        )
+                        age_mins = (dt_utc - spot.time_utc).total_seconds() / 60.0 if getattr(spot, 'time_utc', None) else 0.0
+                        loc.age_mins = age_mins
+                        
+                        if age_mins <= 45.0:
+                            recent_respots_45m += 1
+                            
+                        local_spotters.append(loc)
+                        has_psk_reporter_decode = True
 
     boost = 0
     reasons = []
@@ -1448,13 +1549,14 @@ def parse_spot_evidence(
 
     if has_psk_reporter_decode:
         boost += 15
-        reasons.append("PSKReporter / WSPR live decode")
+        reasons.append("Local PSKReporter/WSPR decode")
 
     if recent_respots_45m >= 4:
         boost += 8
         reasons.append(f"Active activation ({recent_respots_45m} spots in 45m)")
     elif recent_respots_45m >= 2:
         boost += 4
+        reasons.append(f"Moderate activation ({recent_respots_45m} spots in 45m)")
 
     if has_negative_sig and not (has_state_mention or local_spotters):
         boost -= 15
@@ -1666,6 +1768,7 @@ def compute_ionospheric_profile(
     k_index: float,
     a_index: float,
     dt_utc: datetime,
+    meteor_activity: Optional[MeteorActivity] = None,
 ) -> IonosphericProfile:
     """
     Computes multi-layer electron density profile (E, F1, F2).
@@ -1686,6 +1789,12 @@ def compute_ionospheric_profile(
         foE = 0.9 * ((180.0 + 1.44 * sfi) * max(0.01, zenith_sin)) ** 0.25
     else:
         foE = 0.45  # Nighttime residual E-layer
+
+    if meteor_activity and meteor_activity.zhr >= 15:
+        # Boost foE proportionally to meteor activity to model Sporadic-E enhancement
+        zhr_boost = 1.0 + (meteor_activity.zhr / 100.0) * 0.20
+        foE = foE * zhr_boost
+
     hmE = 110.0
 
     # 3. F1-Layer (daytime only)
@@ -1693,8 +1802,15 @@ def compute_ionospheric_profile(
 
     # 4. F2-Layer Base & Solar Zenith Coupling
     sin_mid_elev = math.sin(math.radians(max(0.0, mid_elev)))
-    foF2_base = 3.5 + 0.038 * (sfi - 65.0)
-    foF2_zenith = foF2_base * (0.35 + 0.65 * (sin_mid_elev ** 0.5)) * season_factor
+    foF2_base = 4.2 + 0.045 * (sfi - 65.0)
+    
+    # At night, the ionosphere decays, but during high solar activity the retention is much stronger.
+    # Solar min retention ~65%. Solar max retention ~85-90%.
+    night_retention = 0.65 + 0.002 * max(0.0, sfi - 65.0)
+    night_retention = min(0.95, night_retention)
+    
+    day_factor = night_retention + (1.0 - night_retention) * (sin_mid_elev ** 0.5)
+    foF2_zenith = foF2_base * day_factor * season_factor
 
     # 5. Geomagnetic Sub-Storm & Negative Phase Ion Depletion
     # In sub-storms (even K=2-3), F2 layer recombination rates increase, depleting foF2
@@ -1953,37 +2069,66 @@ def calculate_qso_probability(
             noise_floor_dbw=-135.0,
             qrn_surge_db=0.0,
             lightning_summary=lightning_summary,
+            profile=IonosphericProfile(0.5, 0.0, 5.0, 110.0, 300.0, 100.0, 250.0, 3.0, 0.0),
+            ray_candidate=RayHopCandidate("Direct Groundwave", 1, dist_km, 0.0, 90.0, freq_mhz, False, False, dist_km, 1.0)
         )
 
     # 1b. Check RegionalPathMatrix for fuzzy logic multi-mode openings
     regional_boost = 0
     regional_summary = ""
-    if regional_matrix and target_state:
-        key = (band.upper(), target_state)
-        if key in regional_matrix.openings:
-            openings = regional_matrix.openings[key]
-            # Find the best opening
+    if regional_matrix:
+        openings = []
+        if target_state:
+            openings.extend(regional_matrix.openings.get((band.upper(), target_state), []))
+        if target_grid and len(target_grid) >= 2:
+            openings.extend(regional_matrix.openings.get((band.upper(), target_grid[:2].upper()), []))
+            
+        if openings:
+            # For POTA spots, distance is in index 0. For PSK spots, age is in index 0. 
+            # Both signify "closeness" of the evidence. We just consider all found openings.
             best_dist = min([o[0] for o in openings])
             best_modes = [o[1] for o in openings if o[0] == best_dist]
+            best_snrs = [o[2] for o in openings if o[2] is not None]
             
             # Determine if the opening was created by a weak signal mode
             weak_modes = {"FT8", "FT4", "JS8", "WSPR", "CW", "JT65"}
             opened_by_weak = all(m in weak_modes for m in best_modes)
             target_is_voice = clean_mode in {"SSB", "FM", "AM"}
             
-            if best_dist <= 200:
-                if opened_by_weak and target_is_voice:
-                    regional_boost = 8
-                    regional_summary = f"{band} path to {target_state} confirmed open by local FT8/CW spotters"
+            target_is_cw = clean_mode == "CW"
+
+            # Mode Penalty Logic
+            if (target_is_voice or target_is_cw) and opened_by_weak:
+                if best_snrs:
+                    max_snr = max(best_snrs)
+                    if target_is_voice:
+                        if max_snr >= 0:
+                            regional_boost = 15
+                            regional_summary = f"{band} path confirmed open by exceptionally strong FT8 ({max_snr}dB SNR)"
+                        elif max_snr >= -8:
+                            regional_boost = 5
+                            regional_summary = f"{band} path confirmed open by moderate FT8 ({max_snr}dB SNR - marginal for Voice)"
+                        else:
+                            regional_boost = 0
+                            regional_summary = ""
+                    elif target_is_cw:
+                        if max_snr >= -12:
+                            regional_boost = 15
+                            regional_summary = f"{band} path confirmed open by strong FT8 ({max_snr}dB SNR - good for CW)"
+                        elif max_snr >= -18:
+                            regional_boost = 5
+                            regional_summary = f"{band} path confirmed open by weak FT8 ({max_snr}dB SNR - marginal for CW)"
+                        else:
+                            regional_boost = 0
+                            regional_summary = ""
                 else:
-                    regional_boost = 15
-                    regional_summary = f"{band} path to {target_state} confirmed open by local spotters"
-            elif best_dist <= 400:
-                if opened_by_weak and target_is_voice:
-                    regional_boost = 5
-                else:
-                    regional_boost = 10
-                    regional_summary = f"{band} path to {target_state} confirmed open regionally"
+                    # Weak signal evidence without SNR shouldn't optimistically boost Voice/CW
+                    regional_boost = 0
+                    regional_summary = ""
+            else:
+                regional_boost = 15
+                loc_type = target_state if target_state else (target_grid[:2] if target_grid else "region")
+                regional_summary = f"{band} path to {loc_type} confirmed open by local spotters"
                     
     # Inject regional boost into evidence
     if spot_evidence and regional_boost > 0:
@@ -2067,6 +2212,8 @@ def calculate_qso_probability(
             noise_floor_dbw=-144.0,
             qrn_surge_db=0.0,
             lightning_summary=lightning_summary,
+            profile=IonosphericProfile(0.5, 0.0, 5.0, 110.0, 300.0, 100.0, 250.0, 3.0, 0.0),
+            ray_candidate=RayHopCandidate("Tropospheric LOS", 1, dist_km, 0.5, 85.0, freq_mhz, prob == 0, False, dist_km, 3.0)
         )
 
     # -------------------------------------------------------------
@@ -2083,6 +2230,8 @@ def calculate_qso_probability(
 
         month = dt_utc.month
         is_summer_sporadic_e = (month in (5, 6, 7, 8)) and (mid_elev > -6.0)
+        is_meteor_scatter = solar_weather.meteor_activity and solar_weather.meteor_activity.zhr >= 15
+
         if dist_km <= 90.0:
             prob = 85
             summary = "6m Groundwave / Local Line-of-Sight"
@@ -2091,6 +2240,10 @@ def calculate_qso_probability(
             prob = 65
             summary = "6m Summer Sporadic-E Skip Opening"
             r_mode = "1Es Sporadic-E"
+        elif is_meteor_scatter and 800.0 <= dist_km <= 2200.0:
+            prob = 60 + min(30, int(solar_weather.meteor_activity.zhr / 5.0))
+            summary = f"6m Meteor Scatter ({solar_weather.meteor_activity.active_shower})"
+            r_mode = "Meteor Scatter"
         elif dist_km <= 250.0:
             prob = 30
             summary = "6m Tropospheric Scatter / Marginal"
@@ -2137,6 +2290,14 @@ def calculate_qso_probability(
             noise_floor_dbw=-142.0,
             qrn_surge_db=0.0,
             lightning_summary=lightning_summary,
+            profile=IonosphericProfile(5.0 if is_summer_sporadic_e else 0.5, 0.0, 5.0, 110.0, 300.0, 100.0, 250.0, 3.0, max(0.0, mid_elev / 90.0)),
+            ray_candidate=RayHopCandidate(
+                r_mode, 1, dist_km, 
+                0.5 if "Scatter" in r_mode or "Groundwave" in r_mode else 2.5,
+                80.0, 50.0 if is_summer_sporadic_e else 28.0, 
+                prob <= 5 and r_mode == "Closed / Penetration", False, dist_km, 
+                5.0 if "Scatter" in r_mode or "Groundwave" in r_mode else (90.0 if r_mode == "Meteor Scatter" else 110.0)
+            )
         )
 
     # -------------------------------------------------------------
@@ -2157,6 +2318,7 @@ def calculate_qso_probability(
         k_index=k_idx,
         a_index=a_idx,
         dt_utc=dt_utc,
+        meteor_activity=solar_weather.meteor_activity,
     )
 
     # B. Multi-Hop Ray Tracing & Mode Selection
@@ -2222,7 +2384,7 @@ def calculate_qso_probability(
         sec_phi_d = 1.0 / math.sqrt(max(0.01, 1.0 - sin_phi_d ** 2))
 
         # Vertical 1-way daytime absorption at 10 MHz scaled by gyrofrequency ~1.4 MHz
-        a_d_vert = 0.95 * (daylight_path ** 0.70) * ((10.0 / (freq_mhz + 1.4)) ** 1.75)
+        a_d_vert = 4.5 * (daylight_path ** 0.70) * ((10.0 / (freq_mhz + 1.4)) ** 1.75)
         # 2 transits per hop (up and down through D-layer)
         l_a = 2.0 * primary_mode.hop_count * a_d_vert * sec_phi_d
         l_a = min(35.0, max(0.5, l_a))
@@ -2232,18 +2394,22 @@ def calculate_qso_probability(
     # 3. Ground reflection loss L_g for multi-hop paths (e.g. 2F2 = 1 ground bounce ~ 3.0 dB)
     l_g = (primary_mode.hop_count - 1) * 3.0
 
+    # 4. Ionospheric reflection & scatter loss L_i (deviative absorption / polarization coupling)
+    # The ionosphere is not a perfect mirror; each bounce scatters energy.
+    l_i = primary_mode.hop_count * 8.5
+
     # Total Path Loss in dB
-    total_path_loss_db = round(l_bf + l_a + l_g, 1)
+    total_path_loss_db = round(l_bf + l_a + l_g + l_i, 1)
 
     # E. ITU-R P.372 Noise Calculation + Real-Time Lightning QRN
-    # 1. Man-made noise figure (quiet rural / residential amateur baseline)
-    f_man = max(10.0, 52.0 - 27.7 * math.log10(freq_mhz))
+    # 1. Man-made noise figure (quiet rural / residential amateur baseline with modern DSP)
+    f_man = max(8.0, 48.0 - 27.7 * math.log10(freq_mhz))
     # 2. Galactic noise figure (penetrating above critical plasma frequency)
-    f_gal = max(4.0, 52.0 - 23.0 * math.log10(freq_mhz))
+    f_gal = max(2.0, 48.0 - 23.0 * math.log10(freq_mhz))
     # 3. Atmospheric baseline noise figure (ITU-R P.372 diurnal atmospheric noise)
     # At night, lack of D-layer absorption allows distant global thunderstorm sferics to elevate LF/MF/low-HF noise.
-    f_atm_day = max(6.0, 56.0 - 32.0 * math.log10(freq_mhz))
-    f_atm_night = max(6.0, 72.5 - 37.5 * math.log10(freq_mhz))
+    f_atm_day = max(4.0, 52.0 - 32.0 * math.log10(freq_mhz))
+    f_atm_night = max(4.0, 68.5 - 37.5 * math.log10(freq_mhz))
     sun_factor = max(0.0, min(1.0, daylight_path))
     f_atm_base = (sun_factor * f_atm_day) + ((1.0 - sun_factor) * f_atm_night)
 
@@ -2281,7 +2447,7 @@ def calculate_qso_probability(
     noise_power_dbw = -204.0 + 10.0 * math.log10(bw_hz) + f_a
 
     # F. Transmitter Power & Received Signal Power (dBW)
-    tx_power_dbw = 10.0 * math.log10(tx_watts) - 30.0  # dBW (100W = -10 dBW)
+    tx_power_dbw = 10.0 * math.log10(tx_watts)  # dBW (100W = -10 dBW)
     pota_activator_offset_db = -4.0  # Activator portable field deployment / compromised ground offset
     flare_offset_db = float(solar_weather.flare_penalty) * 0.4 if daylight_path > 0.05 else 0.0
 
@@ -2331,6 +2497,24 @@ def calculate_qso_probability(
     # I. Spot Evidence Fusion
     if spot_evidence:
         total_empirical_boost = spot_evidence.empirical_boost_pct + spot_evidence.regional_boost
+        
+        # Severe local QRN suppression: If the hunter's local noise floor is roaring due to 
+        # thunderstorms, the fact that a remote spotting network can hear the activator
+        # doesn't help the hunter hear them. We suppress the network boost proportionally.
+        if qrn_surge_db > 15.0:
+            suppression_factor = max(0.0, 1.0 - ((qrn_surge_db - 15.0) / 35.0)) # Fades to 0 at 50dB surge (S9+20)
+            total_empirical_boost *= suppression_factor
+            
+        # Skip-Zone Suppression: If the physics model mathematically proves the target is 
+        # inside the user's skip-zone (is_penetrated), we usually suppress global spots.
+        # HOWEVER, if a local spotter (within 150 miles) or a regional network actually
+        # heard them, it proves there is a localized propagation anomaly (e.g., backscatter,
+        # Sporadic-E) overriding the theoretical skip-zone! We MUST trust local human ears.
+        if is_penetrated:
+            has_local_evidence = spot_evidence.regional_boost > 0 or len(spot_evidence.local_spotters) > 0
+            if not has_local_evidence:
+                total_empirical_boost *= 0.10
+            
         raw_rel_pct = max(1.0, min(99.0, raw_rel_pct + float(total_empirical_boost)))
         if not spot_evidence.evidence_summary and spot_evidence.regional_summary:
             spot_evidence.evidence_summary = spot_evidence.regional_summary
@@ -2349,6 +2533,8 @@ def calculate_qso_probability(
         # Path classification
         if is_grayline:
             path_type = "Grayline Twilight Path"
+        elif freq_mhz >= 28.0 and primary_mode.mode_name == "1E" and solar_weather.meteor_activity and solar_weather.meteor_activity.zhr >= 15:
+            path_type = f"10m Meteor Scatter ({solar_weather.meteor_activity.active_shower})"
         elif mid_elev > 0:
             path_type = "Daylight Ionospheric Skywave"
         else:
@@ -2393,13 +2579,15 @@ def calculate_qso_probability(
         station_offset_db=station_offset_db,
         predicted_snr_db=snr_db,
         circuit_reliability_pct=int(round(raw_rel_pct)),
-        ray_mode=primary_mode.mode_name if not is_penetrated else "Skip Zone Cutoff",
+        ray_mode="QRT" if (spot_evidence and spot_evidence.is_qrt) else (primary_mode.mode_name if not is_penetrated else "Skip Zone Cutoff"),
         takeoff_angle_deg=primary_mode.takeoff_angle_deg,
         hop_count=primary_mode.hop_count,
         path_loss_db=total_path_loss_db,
         noise_floor_dbw=round(noise_power_dbw, 1),
         qrn_surge_db=round(qrn_surge_db, 1),
         lightning_summary=lightning_summary,
+        profile=profile,
+        ray_candidate=primary_mode,
     )
 
 

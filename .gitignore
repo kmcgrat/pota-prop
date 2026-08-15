@@ -42,3 +42,12 @@ TODO*
 
 # Park cache (auto-generated at runtime)
 .pota_park_cache.json
+
+# Test and scratch scripts
+test_*.py
+
+# Generated Maps
+map.html
+
+# Brainstorming
+Ideas.txt

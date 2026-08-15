@@ -225,7 +225,13 @@ class ComparedSpot:
     @property
     def has_local_evidence(self) -> bool:
         ev = self.spot_evidence
-        return bool(ev and (len(ev.local_spotters) > 0 or len(ev.local_state_mentions) > 0))
+        if not ev:
+            return False
+        return bool(
+            ev.local_spotters or 
+            ev.local_state_mentions or 
+            ev.has_psk_reporter_decode
+        )
 
     @property
     def status_label(self) -> str:
@@ -657,6 +663,7 @@ def compare_active_spots(
     antenna_type: str = DEFAULT_ANTENNA_TYPE,
     op_call: str = "",
     lightning_summary: Optional[RegionalLightningSummary] = None,
+    psk_spots: Optional[List[Any]] = None,
 ) -> List[ComparedSpot]:
     """
     Compares active spots against hunted parks and computes HF/VHF propagation
@@ -693,6 +700,13 @@ def compare_active_spots(
         user_grid=effective_grid,
         resolver=resolver,
     )
+    
+    if psk_spots:
+        from propagation_engine import inject_psk_spots
+        regional_matrix = inject_psk_spots(regional_matrix, psk_spots)
+
+    # Attach the generated matrix to the function object so caller can read it if needed!
+    compare_active_spots.last_regional_matrix = regional_matrix
 
     def evaluate_spot(spot: ActiveSpot) -> ComparedSpot:
         hunted = hunted_map.get(spot.reference)
@@ -719,6 +733,7 @@ def compare_active_spots(
             user_grid=effective_grid,
             resolver=resolver,
             dt_utc=dt_utc,
+            psk_spots=psk_spots,
         )
 
         # Check if same park in P2P mode

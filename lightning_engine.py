@@ -258,7 +258,7 @@ def compute_cluster_motion_and_toa(
     Returns:
         (speed_mph, heading_deg, is_approaching, estimated_toa_minutes, toa_label)
     """
-    if len(strikes) < 3:
+    if len(strikes) < 5:
         return None, None, False, None, "NA"
 
     # Sort strikes chronologically
@@ -267,17 +267,15 @@ def compute_cluster_motion_and_toa(
     t_max = sorted_strikes[-1].timestamp_utc
     delta_t_sec = t_max - t_min
 
-    # Require at least 60 seconds baseline span between earliest and newest strikes
-    if delta_t_sec < 60.0:
+    # Require at least 45 seconds baseline span between earliest and newest strikes
+    if delta_t_sec < 45.0:
         return None, None, False, None, "NA"
 
-    # Split strikes into earlier half and later half
-    mid_idx = len(sorted_strikes) // 2
-    early_strikes = sorted_strikes[:mid_idx]
-    late_strikes = sorted_strikes[mid_idx:]
-
-    if not early_strikes or not late_strikes:
-        return None, None, False, None, "NA"
+    # Use the earliest 33% and latest 33% of strikes to establish a firmer temporal baseline.
+    # This avoids centroid drift from noisy, symmetric flashing in the middle of the cluster.
+    n_sample = max(2, len(sorted_strikes) // 3)
+    early_strikes = sorted_strikes[:n_sample]
+    late_strikes = sorted_strikes[-n_sample:]
 
     t1 = sum(s.timestamp_utc for s in early_strikes) / len(early_strikes)
     lat1 = sum(s.latitude for s in early_strikes) / len(early_strikes)
@@ -288,15 +286,19 @@ def compute_cluster_motion_and_toa(
     lon2 = sum(s.longitude for s in late_strikes) / len(late_strikes)
 
     dt_hours = (t2 - t1) / 3600.0
-    if dt_hours <= 0.005:  # less than 18 seconds difference between centroids
+    if dt_hours <= 0.01:  # less than 36 seconds difference between centroids
         return None, None, False, None, "NA"
 
     dist_moved_mi, heading_deg = calculate_haversine_miles(lat1, lon1, lat2, lon2)
     speed_mph = dist_moved_mi / dt_hours
 
-    # Physical sanity filtering for convective cells: 4 mph to 90 mph
-    if speed_mph < 4.0 or speed_mph > 90.0:
-        return (round(speed_mph, 1) if speed_mph <= 90.0 else None), (round(heading_deg, 1) if speed_mph <= 90.0 else None), False, None, "NA"
+    # Physical sanity filtering for convective cells: 1.5 mph to 90 mph
+    if speed_mph < 1.5:
+        return None, None, False, None, "NA"
+        
+    # Cap anomalous speed spikes instead of completely discarding the motion vector
+    if speed_mph > 90.0:
+        speed_mph = 90.0
 
     # Vector pointing from current cluster location towards operator's home QTH
     # Cluster is at bearing current_bearing_deg FROM home QTH, so vector toward home is (current_bearing_deg + 180) % 360
@@ -713,8 +715,10 @@ class RegionalLightningSummary:
             surge_contrib = cell.intensity_weight * 7.0 * dist_weight * freq_factor
             total_surge += surge_contrib
 
+        # Use 10*log10 to model the average power of static crashes (allowing DSP/human brain to listen between spikes)
         effective_surge = 10.0 * math.log10(1.0 + total_surge)
-        return max(0.0, min(30.0, round(effective_surge, 1)))
+        # Cap at 20 dB (approx 3.5 S-units of average noise floor degradation)
+        return max(0.0, min(20.0, round(effective_surge, 1)))
 
 
 # =====================================================================

@@ -11,6 +11,8 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
+QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+
 from data_engine import (
     ActiveSpot,
     HuntedPark,
@@ -1024,9 +1026,21 @@ class TestStationPropagationModeling(unittest.TestCase):
         third_party_respots = [
             {"spotter": "K8AA", "comments": "59 in Charleston WV loud!", "spotTime": "2026-08-04T12:05:00"},
         ]
+        
+        # Inject mock cache to ensure K8AA is within 200 miles
+        from propagation_engine import CallsignResolver
+        resolver = CallsignResolver()
+        resolver.memory_cache["K8AA"] = {
+            "state": "WV",
+            "grid": "EM98dh",
+            "latitude": home_lat,
+            "longitude": home_lon,
+            "name": "Test Mock"
+        }
+        
         ev_3rd = parse_spot_evidence(
             third_party_respots, home_lat=home_lat, home_lon=home_lon,
-            activator_call="W8WV", user_grid="EM98dh"
+            activator_call="W8WV", user_grid="EM98dh", resolver=resolver
         )
         self.assertGreaterEqual(len(ev_3rd.local_spotters), 1)
         self.assertGreater(ev_3rd.empirical_boost_pct, 0)
@@ -1036,7 +1050,7 @@ class TestStationPropagationModeling(unittest.TestCase):
         """Test detection of hunter_parks.csv age (>24 hours) and startup advisory."""
         import tempfile
         import time
-        from pota_hunter import POTAHunterApp
+        from pota_prop import POTAPropApp
 
         # 1. Create a dummy CSV file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
@@ -1056,7 +1070,7 @@ class TestStationPropagationModeling(unittest.TestCase):
             if app is None:
                 app = QApplication(sys.argv)
 
-            window = POTAHunterApp()
+            window = POTAPropApp()
             window.txt_csv_path.setText(temp_csv)
             window.load_initial_csv()
 
@@ -1307,9 +1321,9 @@ class TestStationPropagationModeling(unittest.TestCase):
     def test_adaptive_startup_lightning_timer(self):
         """Test that GUI adaptive startup lightning timer runs every 5s for first 30s, 10s for next 30s, then stops."""
         import time
-        from pota_hunter import POTAHunterApp
+        from pota_prop import POTAPropApp
 
-        window = POTAHunterApp()
+        window = POTAPropApp()
         self.assertTrue(window.startup_lightning_timer.isActive())
         self.assertEqual(window.startup_lightning_timer.interval(), 5000)
 
@@ -1352,6 +1366,7 @@ class TestStationPropagationModeling(unittest.TestCase):
         strikes = [
             LightningStrike(timestamp_utc=now - 600.0, latitude=37.95, longitude=-82.15, distance_miles=35.0, bearing_deg=225.0),
             LightningStrike(timestamp_utc=now - 550.0, latitude=37.96, longitude=-82.14, distance_miles=34.0, bearing_deg=225.0),
+            LightningStrike(timestamp_utc=now - 300.0, latitude=38.00, longitude=-82.08, distance_miles=30.0, bearing_deg=225.0),
             LightningStrike(timestamp_utc=now - 50.0, latitude=38.05, longitude=-82.02, distance_miles=27.0, bearing_deg=225.0),
             LightningStrike(timestamp_utc=now, latitude=38.06, longitude=-82.01, distance_miles=26.0, bearing_deg=225.0),
         ]
@@ -1502,10 +1517,10 @@ class TestStationPropagationModeling(unittest.TestCase):
 
     def test_gui_callsign_and_grid_change_triggers_lightning_reset(self):
         """Test that GUI callsign lookup and grid change update the lightning summary to new location."""
-        from pota_hunter import POTAHunterApp
+        from pota_prop import POTAPropApp
         from propagation_engine import CallsignLocation
 
-        window = POTAHunterApp()
+        window = POTAPropApp()
         window.chk_p2p.setChecked(False)
         self.assertIsNotNone(window.lightning_summary)
 
@@ -1606,7 +1621,7 @@ class TestStationPropagationModeling(unittest.TestCase):
 
     def test_band_noise_dialog_gui_instantiation(self):
         """Test that BandNoiseDialog instantiates and populates table without UI exceptions."""
-        from pota_hunter import BandNoiseDialog
+        from pota_prop import BandNoiseDialog
         from propagation_engine import SolarWeather
         from lightning_engine import RegionalLightningSummary, StormCell
 
@@ -1650,7 +1665,7 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
 
     def test_worked_parks_tracker(self):
         from datetime import datetime, timezone
-        from pota_hunter import WorkedParksTracker
+        from pota_prop import WorkedParksTracker
         tracker = WorkedParksTracker()
         self.assertEqual(len(tracker), 0)
 
@@ -1671,11 +1686,11 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
 
     def test_get_worked_status_transitions(self):
         from propagation_engine import SolarWeather
-        from pota_hunter import POTAHunterApp
+        from pota_prop import POTAPropApp
         from data_engine import ActiveSpot
         from datetime import datetime, timezone
 
-        window = POTAHunterApp()
+        window = POTAPropApp()
         today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         # Mock single active spot
@@ -1764,9 +1779,9 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
         window.close()
 
     def test_utc_clock_display(self):
-        from pota_hunter import POTAHunterApp
+        from pota_prop import POTAPropApp
         from datetime import datetime, timezone
-        window = POTAHunterApp()
+        window = POTAPropApp()
         
         expected_prefix = "Time: "
         expected_suffix = " UTC"
@@ -1793,16 +1808,16 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
 
         desc0, icon0, short0 = get_wmo_info(0)
         self.assertEqual(desc0, "Clear Sky")
-        self.assertEqual(icon0, "☀️")
+        self.assertEqual(icon0, "")
         self.assertEqual(short0, "Clear")
 
         desc63, icon63, short63 = get_wmo_info(63)
         self.assertEqual(desc63, "Moderate Rain")
-        self.assertEqual(icon63, "🌧️")
+        self.assertEqual(icon63, "")
 
         desc95, icon95, short95 = get_wmo_info(95)
         self.assertEqual(desc95, "Thunderstorm")
-        self.assertEqual(icon95, "🌩️")
+        self.assertEqual(icon95, "")
 
         self.assertEqual(degrees_to_cardinal(0.0), "N")
         self.assertEqual(degrees_to_cardinal(90.0), "E")
@@ -1830,6 +1845,7 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
                 wind_speed_mph=8.5,
                 wind_dir_deg=315.0,
                 wind_dir_cardinal="NW",
+                humidity_pct=45.0,
             ),
             hourly_forecast=[
                 HourlyForecastItem(
@@ -1841,6 +1857,8 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
                     wind_speed_mph=9.0,
                     wind_dir_deg=320.0,
                     wind_dir_cardinal="NW",
+                    precip_prob=10,
+                    humidity_pct=50.0,
                 ),
                 HourlyForecastItem(
                     dt_utc=datetime(2026, 8, 7, 15, 0, 0, tzinfo=timezone.utc),
@@ -1851,6 +1869,8 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
                     wind_speed_mph=7.0,
                     wind_dir_deg=300.0,
                     wind_dir_cardinal="NW",
+                    precip_prob=0,
+                    humidity_pct=40.0,
                 ),
             ],
             home_lat=38.3,
@@ -1874,12 +1894,12 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
 
     def test_gui_weather_card_integration(self):
         """Test GUI card_weather initialization and update upon weather fetch."""
-        from pota_hunter import POTAHunterApp
+        from pota_prop import POTAPropApp
         from weather_engine import WeatherForecastSummary, CurrentWeatherItem
 
-        window = POTAHunterApp()
+        window = POTAPropApp()
         self.assertIsNotNone(window.card_weather)
-        self.assertEqual(window.card_weather.lbl_title.text(), "LOCAL WEATHER")
+        self.assertEqual(window.card_weather.lbl_title.text(), "WEATHER (CLICK FOR RADAR)")
 
         summary = WeatherForecastSummary(
             current=CurrentWeatherItem(
@@ -1891,6 +1911,7 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
                 wind_speed_mph=5.0,
                 wind_dir_deg=180.0,
                 wind_dir_cardinal="S",
+                humidity_pct=45.0,
             )
         )
         window._on_weather_fetched(summary)
@@ -1908,8 +1929,8 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
 
     def test_p2p_park_name_location_tooltip(self):
         """Test that setting a P2P park reference resolves the park name and updates tooltips."""
-        from pota_hunter import POTAHunterApp
-        window = POTAHunterApp()
+        from pota_prop import POTAPropApp
+        window = POTAPropApp()
         window.chk_p2p.setChecked(True)
         window.txt_p2p_park.setText("US-1845")
         window.p2p_my_park = "US-1845"

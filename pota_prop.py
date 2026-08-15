@@ -9,11 +9,14 @@ import csv
 import os
 import sys
 import time
+import json
 import webbrowser
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
+import logging
+import math
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional, Tuple
 
-APP_VERSION = "26.8.10"
+APP_VERSION = "26.8.14-rc1"
 
 
 from PyQt6.QtCore import (
@@ -35,6 +38,10 @@ from PyQt6.QtGui import (
     QFont,
     QIcon,
     QKeySequence,
+    QShortcut,
+    QPainter,
+    QPen,
+    QPainterPath,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -44,6 +51,7 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGroupBox,
@@ -55,6 +63,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QToolBar,
     QRadioButton,
     QScrollArea,
     QSizePolicy,
@@ -66,7 +75,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineProfile
+from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings
+from PyQt6.QtWebChannel import QWebChannel
 
 from data_engine import (
     DEFAULT_HUNTER_CSV_PATH,
@@ -110,7 +120,69 @@ from propagation_engine import (
     is_self_spot,
     maidenhead_to_latlon,
     resolve_antenna_preset,
+    calculate_qso_probability,
+    calculate_distance_and_bearing,
+    RegionalPathMatrix,
 )
+
+
+def calculate_grayline_polylines(zenith_deg=90.0):
+    dt = datetime.now(timezone.utc)
+    day = dt.timetuple().tm_yday
+    fractional_day = dt.hour / 24.0 + dt.minute / 1440.0 + dt.second / 86400.0
+    
+    gamma = 2 * math.pi / 365.0 * (day - 1 + fractional_day)
+    
+    decl = (0.006918 - 0.399912 * math.cos(gamma) + 0.070257 * math.sin(gamma)
+            - 0.006758 * math.cos(2 * gamma) + 0.000907 * math.sin(2 * gamma)
+            - 0.002697 * math.cos(3 * gamma) + 0.00148 * math.sin(3 * gamma))
+            
+    eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(gamma) - 0.032077 * math.sin(gamma)
+                       - 0.014615 * math.cos(2 * gamma) - 0.040849 * math.sin(2 * gamma))
+                       
+    tst = dt.hour * 60 + dt.minute + dt.second / 60.0 + eqtime
+    # Sun moves west: at noon UTC, tst~720, sun_lon~0. At 18:00 UTC, tst~1080, sun_lon~-90.
+    sun_lon = 180.0 - (tst / 4.0)
+    
+    z_rad = math.radians(zenith_deg)
+    
+    points1 = []
+    points2 = []
+    for lat in range(-89, 90, 2):
+        lat_rad = math.radians(lat)
+        num = math.cos(z_rad) - math.sin(lat_rad) * math.sin(decl)
+        den = math.cos(lat_rad) * math.cos(decl)
+        cos_ha = num / den
+        
+        if -1.0 <= cos_ha <= 1.0:
+            ha_deg = math.degrees(math.acos(cos_ha))
+            lon1 = ((sun_lon - ha_deg + 540) % 360) - 180
+            lon2 = ((sun_lon + ha_deg + 540) % 360) - 180
+            points1.append([lat, lon1])
+            points2.append([lat, lon2])
+            
+    # Sort points1 ascending by lat, points2 descending by lat to form a continuous line
+    points1.sort(key=lambda x: x[0])
+    points2.sort(key=lambda x: x[0], reverse=True)
+    all_points = points1 + points2
+    
+    segments = []
+    current_segment = []
+    for pt in all_points:
+        if not current_segment:
+            current_segment.append(pt)
+        else:
+            prev_lon = current_segment[-1][1]
+            # Split segment if there's a large longitude jump (dateline wrap or pole artifact)
+            if abs(pt[1] - prev_lon) > 90.0:
+                segments.append(current_segment)
+                current_segment = [pt]
+            else:
+                current_segment.append(pt)
+    if current_segment:
+        segments.append(current_segment)
+        
+    return segments
 
 
 DARK_STYLESHEET = """
@@ -118,7 +190,7 @@ QMainWindow, QWidget {
     background-color: #161b22;
     color: #e6edf3;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    font-size: 13px;
+    font-size: 12px;
 }
 
 QGroupBox {
@@ -378,6 +450,42 @@ class FetchSpotsWorker(QRunnable):
                 pass
 
 
+class FetchPSKWorkerSignals(QObject):
+    finished = pyqtSignal(list)
+
+
+class FetchPSKWorker(QRunnable):
+    def __init__(self, rbn_node: str):
+        super().__init__()
+        self.rbn_node = rbn_node
+        self.signals = FetchPSKWorkerSignals()
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            from psk_engine import fetch_psk_spots
+            spots = fetch_psk_spots(self.rbn_node, max_age_minutes=15)
+            self.signals.finished.emit(spots)
+        except Exception:
+            self.signals.finished.emit([])
+
+class FetchActivatorPSKWorker(QRunnable):
+    def __init__(self, activator_call: str):
+        super().__init__()
+        self.activator_call = activator_call
+        self.signals = FetchPSKWorkerSignals()
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            from psk_engine import fetch_activator_psk_spots
+            spots = fetch_activator_psk_spots(self.activator_call, max_age_minutes=15)
+            self.signals.finished.emit(spots)
+        except Exception:
+            self.signals.finished.emit([])
+
 class CallsignLookupWorkerSignals(QObject):
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
@@ -501,12 +609,12 @@ class StatCard(QFrame):
 
         self.lbl_title = QLabel(title.upper())
         self.lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_title.setStyleSheet("color: #8b949e; font-size: 11px; font-weight: 700;")
+        self.lbl_title.setStyleSheet("color: #8b949e; font-size: 10px; font-weight: 700;")
         layout.addWidget(self.lbl_title)
 
         self.lbl_value = QLabel(value)
         self.lbl_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        font_size = "14px" if len(value) > 14 else "18px"
+        font_size = "12px" if len(value) > 14 else "16px"
         self.lbl_value.setStyleSheet(
             f"color: {accent_color}; font-size: {font_size}; font-weight: 800;"
         )
@@ -520,7 +628,7 @@ class StatCard(QFrame):
     def set_value(self, val: str):
         val_str = str(val)
         self.lbl_value.setText(val_str)
-        font_size = "14px" if len(val_str) > 14 else "18px"
+        font_size = "12px" if len(val_str) > 14 else "16px"
         self.lbl_value.setStyleSheet(
             f"color: {self.accent_color}; font-size: {font_size}; font-weight: 800;"
         )
@@ -541,7 +649,7 @@ class StatCard(QFrame):
             }}
             """
         )
-        font_size = "14px" if len(self.lbl_value.text()) > 14 else "18px"
+        font_size = "12px" if len(self.lbl_value.text()) > 14 else "16px"
         self.lbl_value.setStyleSheet(
             f"color: {accent_color}; font-size: {font_size}; font-weight: 800;"
         )
@@ -552,14 +660,43 @@ class WeatherRadarDialog(QDialog):
     Live Weather Radar dialog embedding a Windy.com interactive radar map centered on the user's location.
     """
     def __init__(self, home_lat: float, home_lon: float, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, Qt.WindowType.Window | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
         self.setWindowTitle("Live Weather Radar (Windy.com)")
         self.resize(1000, 750)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         
         self.web_view = QWebEngineView(self)
+        layout.addWidget(self.web_view)
+        
+        # Floating fullscreen button overlay
+        self.btn_fs = QPushButton("⛶", self)
+        self.btn_fs.setFixedSize(36, 36)
+        self.btn_fs.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(22, 27, 34, 0.85);
+                color: white;
+                border: 2px solid rgba(255, 255, 255, 0.2);
+                border-radius: 6px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: rgba(48, 54, 61, 1.0);
+                border-color: rgba(255, 255, 255, 0.5);
+            }
+        """)
+        self.btn_fs.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_fs.clicked.connect(self.toggle_fullscreen)
+        
+        # Shortcuts
+        self.shortcut_fs = QShortcut(QKeySequence("F11"), self)
+        self.shortcut_fs.activated.connect(self.toggle_fullscreen)
+        self.shortcut_esc = QShortcut(QKeySequence("Esc"), self)
+        self.shortcut_esc.activated.connect(self.showNormal)
         
         # Build Windy Embed URL
         url = (
@@ -570,7 +707,17 @@ class WeatherRadarDialog(QDialog):
         )
         self.web_view.setUrl(QUrl(url))
         
-        layout.addWidget(self.web_view)
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Keep the floating button in the top right corner
+        self.btn_fs.move(self.width() - self.btn_fs.width() - 10, 10)
+        self.btn_fs.raise_()
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
 
 class BandNoiseDialog(QDialog):
     """
@@ -609,7 +756,7 @@ class BandNoiseDialog(QDialog):
         h_layout.setContentsMargins(8, 8, 8, 8)
         h_layout.setSpacing(6)
 
-        title_lbl = QLabel("📡 Receiver Noise Floor & ITU-R P.372 Band Matrix")
+        title_lbl = QLabel("Receiver Noise Floor & ITU-R P.372 Band Matrix")
         title_lbl.setStyleSheet("color: #58a6ff; font-size: 18px; font-weight: 800;")
         h_layout.addWidget(title_lbl)
 
@@ -642,11 +789,11 @@ class BandNoiseDialog(QDialog):
             "Band",
             "Frequency",
             "⚡ Atmospheric (QRN)",
-            "🌌 Galactic (Space)",
-            "🏙️ Man-Made",
+            "Galactic (Space)",
+            "Man-Made",
             "Total Noise (Fa)",
             "Noise Power (SSB)",
-            "📻 Est. S-Meter",
+            "Est. S-Meter",
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -800,6 +947,167 @@ class BandNoiseDialog(QDialog):
             self.table.setItem(row, 7, it_smeter)
 
 
+class PropagationDiagramWindow(QDialog):
+    def __init__(self, prop_result, cs=None, parent=None):
+        super().__init__(parent)
+        self.prop = prop_result
+        self.cs = cs
+        self.setWindowTitle("Propagation Diagram")
+        self.resize(800, 500)
+        self.setStyleSheet("background-color: #0d1117; color: #c9d1d9;")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        w = self.width()
+        h = self.height()
+        
+        painter.fillRect(self.rect(), QColor("#0d1117"))
+        
+        if not self.prop:
+            painter.setPen(QColor("#8b949e"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No propagation data available.")
+            return
+
+        ground_y = h - 60
+        scale_x = (w - 100) / max(10, self.prop.distance_km)
+        scale_y = (h - 150) / max(300, 450)
+        
+        # Draw ground
+        painter.setPen(QPen(QColor("#3fb950"), 2))
+        painter.drawLine(50, ground_y, w - 50, ground_y)
+        
+        font = painter.font()
+        font.setBold(True)
+        painter.setFont(font)
+        
+        hunter_call = "HUNTER"
+        from PyQt6.QtCore import QSettings, QRectF
+        settings = QSettings("POTA", "HunterComparator")
+        my_call = str(settings.value("my_call", "")).strip().upper()
+        if my_call:
+            hunter_call = my_call
+            
+        activator_call = self.cs.spot.activator if self.cs and hasattr(self.cs, 'spot') else "ACTIVATOR"
+        
+        hunter_rect = QRectF(50 - 100, ground_y + 10, 200, 20)
+        painter.drawText(hunter_rect, Qt.AlignmentFlag.AlignCenter, hunter_call)
+        
+        activator_x = 50 + self.prop.distance_km * scale_x
+        activator_rect = QRectF(activator_x - 100, ground_y + 10, 200, 20)
+        painter.drawText(activator_rect, Qt.AlignmentFlag.AlignCenter, activator_call)
+        
+        font.setBold(False)
+        painter.setFont(font)
+        
+        # Draw layers (flat)
+        if hasattr(self.prop, 'profile') and self.prop.profile:
+            prof = self.prop.profile
+            def draw_flat_layer(height_km, color, opacity, name):
+                if opacity <= 0.05: return
+                y = ground_y - height_km * scale_y
+                painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), int(255*opacity)), 1, Qt.PenStyle.DashLine))
+                painter.drawLine(50, int(y), w - 50, int(y))
+                painter.setPen(QColor(color.red(), color.green(), color.blue(), 255))
+                painter.drawText(50, int(y - 5), name)
+            
+            draw_flat_layer(75, QColor(255, 165, 0), max(0.2, prof.daylight_path), "D-Layer (75km - Absorption)")
+            draw_flat_layer(prof.hmE, QColor(0, 191, 255), 0.6, f"E-Layer ({int(prof.hmE)}km)")
+            draw_flat_layer(prof.hmF2, QColor(138, 43, 226), 0.9, f"F2-Layer ({int(prof.hmF2)}km - Refraction)")
+        
+        # Draw Ray
+        if hasattr(self.prop, 'ray_candidate') and self.prop.ray_candidate:
+            ray = self.prop.ray_candidate
+            
+            # If the physics model says it penetrated, but empirical evidence (local spots)
+            # pushed the probability score high enough to be viable, force refraction on the diagram.
+            empirically_viable = self.prop.probability_pct >= 40
+            draw_as_penetrated = ray.is_penetrated and not empirically_viable
+            
+            painter.setPen(QPen(QColor("#f85149" if draw_as_penetrated else "#3fb950"), 3))
+            
+            hops = ray.hop_count
+            dist_per_hop = self.prop.distance_km / hops
+            path = QPainterPath()
+            path.moveTo(50, ground_y)
+            
+            for i in range(hops):
+                x_start = 50 + (i * dist_per_hop) * scale_x
+                x_end = 50 + ((i + 1) * dist_per_hop) * scale_x
+                x_mid = (x_start + x_end) / 2
+                
+                y_peak = ground_y - ray.virtual_height_km * scale_y
+                
+                if draw_as_penetrated:
+                    tan_a = math.tan(math.radians(max(0.1, ray.takeoff_angle_deg)))
+                    end_y = y_peak - 40
+                    end_x = x_start + (ground_y - end_y) / (tan_a * scale_y / scale_x)
+                    path.lineTo(end_x, end_y)
+                    break
+                else:
+                    path.quadTo(x_mid, y_peak - (y_peak*0.1), x_end, ground_y)
+            
+            painter.drawPath(path)
+            
+            if ray.is_penetrated and empirically_viable:
+                painter.setPen(QPen(QColor("#f85149"), 2, Qt.PenStyle.DashLine))
+                dash_path = QPainterPath()
+                dash_path.moveTo(50, ground_y)
+                tan_a = math.tan(math.radians(max(0.1, ray.takeoff_angle_deg)))
+                y_peak = ground_y - ray.virtual_height_km * scale_y
+                end_y = y_peak - 40
+                end_x = 50 + (ground_y - end_y) / (tan_a * scale_y / scale_x)
+                dash_path.lineTo(end_x, end_y)
+                painter.drawPath(dash_path)
+            
+            # Educational Text Summary
+            painter.setPen(QColor("#c9d1d9"))
+            solar = self.prop.solar_info
+            freq_str = self.cs.frequency_mhz_str if self.cs else "?"
+            band_str = self.cs.spot.band if self.cs else "?"
+            text = (f"Frequency: {freq_str} ({band_str} {ray.mode_name})  |  "
+                    f"Distance: {int(self.prop.distance_km)} km  |  Takeoff Angle: {ray.takeoff_angle_deg}°\n"
+                    f"Solar Weather: SFI {int(solar.sfi)} | Kp {int(solar.k_index)} | Ap {int(solar.a_index)} | {solar.condition}\n\n")
+            if draw_as_penetrated:
+                text += "SKIP ZONE: Signal penetrated the ionosphere because the frequency is too high for the current F2 MUF.\n"
+                text += "The activator is located inside your skip zone and cannot be heard via skywave."
+            elif ray.is_penetrated and empirically_viable:
+                is_lower_hf = False
+                if self.cs and hasattr(self.cs, 'spot') and getattr(self.cs.spot, 'frequency_khz', 0) > 0:
+                    is_lower_hf = self.cs.spot.frequency_khz < 14000.0
+                else:
+                    band_clean = str(band_str).lower().strip()
+                    is_lower_hf = band_clean in ["160m", "80m", "60m", "40m", "30m", "160", "80", "60", "40", "30"]
+                
+                if is_lower_hf:
+                    anomaly_cause = "Backscatter or NVIS anomaly"
+                else:
+                    anomaly_cause = "Sporadic-E (Es) or Chordal Hop"
+                text += f"EMPIRICAL ANOMALY: Physics model predicted skip zone penetration, but local spotters confirm the path is open (likely {anomaly_cause}).\n"
+            elif ray.is_screened_by_e:
+                text += "E-LAYER SCREENING: Signal was blocked by a dense E-layer and could not reach the F2 layer."
+            else:
+                text += "SUCCESSFUL REFRACTION: Signal successfully bounced off the ionosphere to reach the target.\n"
+                if hasattr(self.prop, 'profile') and self.prop.profile and self.prop.profile.daylight_path > 0.5:
+                    text += "Note: Daytime solar radiation creates a D-layer, absorbing energy from your signal on lower frequencies.\n"
+
+            if self.cs and getattr(self.cs, 'spot_evidence', None) and self.cs.spot_evidence.local_spotters:
+                text += "\nLocal Spotters Hearing Activator:\n"
+                for s in self.cs.spot_evidence.local_spotters[:4]:
+                    meth = getattr(s, 'method', 'POTA Spot')
+                    if getattr(s, 'snr', None) is not None:
+                        meth += f" ({s.snr:+.0f}dB)"
+                    dist = f"{int(s.distance_miles)}mi" if getattr(s, 'distance_miles', None) is not None else ""
+                    text += f" • {s.callsign} [{meth}] {dist}\n"
+                if len(self.cs.spot_evidence.local_spotters) > 4:
+                    text += f" • ... and {len(self.cs.spot_evidence.local_spotters)-4} more local stations\n"
+            
+            from PyQt6.QtCore import QRectF
+            rect = QRectF(50, 20, w - 100, 150)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap, text)
+
+
 class SpotHistoryDialog(QDialog):
     """
     Detailed modal dialog showing live spot intelligence, empirical evidence breakdown,
@@ -814,7 +1122,7 @@ class SpotHistoryDialog(QDialog):
         self.setWindowTitle(
             f"Spot Intelligence & Respot Stream - {cs.spot.activator} @ {cs.spot.reference}"
         )
-        self.resize(880, 560)
+        self.resize(880, 640)
         self.setStyleSheet(DARK_STYLESHEET)
 
         layout = QVBoxLayout(self)
@@ -824,17 +1132,17 @@ class SpotHistoryDialog(QDialog):
         # 1. Header Banner
         header = QFrame()
         header.setStyleSheet(
-            "background-color: #1c2128; border: 1px solid #30363d; border-radius: 8px; padding: 10px;"
+            "background-color: #1c2128; border: 1px solid #30363d; border-radius: 8px; padding: 6px;"
         )
         h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(8, 8, 8, 8)
+        h_layout.setContentsMargins(6, 6, 6, 6)
 
         # Activator & Park details
         info_vbox = QVBoxLayout()
         lbl_act = QLabel(
-            f"<span style='color:#58a6ff; font-size:18px; font-weight:800;'>{cs.spot.activator}</span> "
+            f"<span style='color:#58a6ff; font-size:15px; font-weight:800;'>{cs.spot.activator}</span> "
             f"<span style='color:#8b949e;'>at</span> "
-            f"<span style='color:#f1e05a; font-size:16px; font-weight:700;'>{cs.spot.reference}</span>"
+            f"<span style='color:#f1e05a; font-size:14px; font-weight:700;'>{cs.spot.reference}</span>"
         )
         lbl_name = QLabel(
             f"<b>{cs.display_name}</b> - <span style='color:#8b949e;'>{cs.display_location}</span>"
@@ -862,15 +1170,15 @@ class SpotHistoryDialog(QDialog):
             prob_color = "#8b949e"  # Gray - Weak
         prob_card = QFrame()
         prob_card.setStyleSheet(
-            f"background-color: #161b22; border: 2px solid {prob_color}; border-radius: 8px; padding: 6px 16px;"
+            f"background-color: #161b22; border: 2px solid {prob_color}; border-radius: 8px; padding: 4px 10px;"
         )
         prob_vbox = QVBoxLayout(prob_card)
         prob_vbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_p_title = QLabel("QSO SCORE")
-        lbl_p_title.setStyleSheet("color: #8b949e; font-size: 10px; font-weight: bold;")
+        lbl_p_title.setStyleSheet("color: #8b949e; font-size: 9px; font-weight: bold;")
         score_text = f"{prob} !" if prob >= 99 else f"{prob}"
         lbl_p_val = QLabel(score_text)
-        lbl_p_val.setStyleSheet(f"color: {prob_color}; font-size: 26px; font-weight: 900;")
+        lbl_p_val.setStyleSheet(f"color: {prob_color}; font-size: 20px; font-weight: 900;")
         prob_vbox.addWidget(lbl_p_title, alignment=Qt.AlignmentFlag.AlignCenter)
         prob_vbox.addWidget(lbl_p_val, alignment=Qt.AlignmentFlag.AlignCenter)
         h_layout.addWidget(prob_card)
@@ -906,25 +1214,38 @@ class SpotHistoryDialog(QDialog):
             f"<b>Ionospheric Path:</b> {prop_desc} | <b>Distance & Heading:</b> {dist_info} | "
             f"<b>Estimated MUF:</b> {muf_info}{voacap_line}"
         )
+        lbl_phys.setWordWrap(True)
         s_layout.addWidget(lbl_phys)
 
         # Empirical Evidence details
         ev = cs.spot_evidence
         if ev:
-            local_spotter_names = [
-                (
-                    f"{s.callsign} ({s.state or ''} {s.grid or ''}, {int(s.distance_miles)} mi away)"
-                    if s.distance_miles
-                    else f"{s.callsign} ({s.state or ''})"
-                )
-                for s in ev.local_spotters
-            ]
             op_land_tag = ev.op_land_desc if (ev and ev.op_land_desc) else "Local Area"
-            local_str = (
-                ", ".join(local_spotter_names)
-                if local_spotter_names
-                else f"None detected in immediate {op_land_tag} area"
-            )
+            
+            if ev.local_spotters:
+                table_html = "<table style='margin-top: 8px; border-collapse: collapse; width: 100%; border: 1px solid #30363d;'>"
+                table_html += "<tr style='background-color: #21262d; color: #8b949e; text-align: left;'>"
+                table_html += "<th style='padding: 4px 8px; border: 1px solid #30363d;'>Callsign</th>"
+                table_html += "<th style='padding: 4px 8px; border: 1px solid #30363d;'>Method</th>"
+                table_html += "<th style='padding: 4px 8px; border: 1px solid #30363d;'>Dist / Age</th></tr>"
+                
+                for s in ev.local_spotters:
+                    dist_str = f"{int(s.distance_miles)}mi" if s.distance_miles is not None else ""
+                    age_str = f"{int(s.age_mins)}m ago" if getattr(s, 'age_mins', None) is not None else ""
+                    dist_age_val = f"{dist_str} {age_str}".strip()
+                    method_val = getattr(s, 'method', 'POTA Spot')
+                    if getattr(s, 'snr', None) is not None:
+                        method_val += f" ({s.snr:+.0f}dB)"
+                        
+                    table_html += "<tr>"
+                    table_html += f"<td style='padding: 4px 8px; border: 1px solid #30363d;'><b>{s.callsign}</b></td>"
+                    table_html += f"<td style='padding: 4px 8px; border: 1px solid #30363d; color: #a5d6ff;'>{method_val}</td>"
+                    table_html += f"<td style='padding: 4px 8px; border: 1px solid #30363d; color: #8b949e;'>{dist_age_val}</td>"
+                    table_html += "</tr>"
+                table_html += "</table>"
+            else:
+                table_html = f"<div style='margin-top: 4px;'><i>None detected in immediate {op_land_tag} area.</i></div>"
+
             sig_str = ", ".join(ev.signal_reports) if ev.signal_reports else "None noted"
             state_str = ", ".join(ev.local_state_mentions) if ev.local_state_mentions else "None"
 
@@ -938,13 +1259,23 @@ class SpotHistoryDialog(QDialog):
                 )
             )
 
+            reason_str = f"<br><b>Reasoning:</b> <i>{ev.evidence_summary}</i>" if ev.evidence_summary else ""
             lbl_ev = QLabel(
-                f"<b>Local Spotters ({op_land_tag}):</b> <span style='color:#79c0ff;'>{local_str}</span><br>"
-                f"<b>Reports & Mentions:</b> {state_str} | <b>Signal Reports:</b> {sig_str} | <b>Impact:</b> {boost_text}"
+                f"<b>Local Spotter Evidence ({op_land_tag}):</b><br>{table_html}<br>"
+                f"<b>Reports & Mentions:</b> {state_str} | <b>Signal Reports:</b> {sig_str} | <b>Impact:</b> {boost_text}{reason_str}"
             )
+            lbl_ev.setWordWrap(True)
             s_layout.addWidget(lbl_ev)
         else:
             s_layout.addWidget(QLabel("<i>No empirical spot stream history available for this station.</i>"))
+
+        # View Propagation Diagram Button
+        if cs.propagation:
+            btn_diagram = QPushButton("View Propagation Diagram")
+            btn_diagram.setStyleSheet("background-color: #238636; color: white; border-radius: 4px; padding: 6px; font-weight: bold;")
+            btn_diagram.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_diagram.clicked.connect(self.show_propagation_diagram)
+            s_layout.addWidget(btn_diagram)
 
         layout.addWidget(summary_box)
 
@@ -1026,6 +1357,161 @@ class SpotHistoryDialog(QDialog):
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close, alignment=Qt.AlignmentFlag.AlignRight)
 
+    def show_propagation_diagram(self):
+        if self.cs.propagation:
+            diag = PropagationDiagramWindow(self.cs.propagation, self.cs, self)
+            diag.exec()
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Preferences")
+        self.resize(500, 350)
+        self.setMinimumSize(450, 250)
+        
+        layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+        
+        self.txt_call = QLineEdit(parent.my_call)
+        self.txt_call.setPlaceholderText("e.g. W8XYZ")
+        form_layout.addRow("Operator Callsign:", self.txt_call)
+        
+        self.txt_grid = QLineEdit(parent.home_grid)
+        self.txt_grid.setPlaceholderText("e.g. EM98dh")
+        form_layout.addRow("Home Grid Locator:", self.txt_grid)
+        
+        rbn_layout = QHBoxLayout()
+        self.txt_rbn = QLineEdit(getattr(parent, 'rbn_nodes_str', "W1AW"))
+        self.txt_rbn.setPlaceholderText("e.g. W1AW, K3LR, N4ZR")
+        
+        btn_find = QPushButton("Auto-Find Nearest")
+        btn_find.clicked.connect(self.auto_find_rbn)
+        
+        rbn_layout.addWidget(self.txt_rbn)
+        rbn_layout.addWidget(btn_find)
+        form_layout.addRow("Local RBN/PSK Nodes:", rbn_layout)
+        
+        self.lbl_distances = QLabel("Distances: (type callsigns to calculate)")
+        self.lbl_distances.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_distances.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        
+        scroll = QScrollArea()
+        scroll.setWidget(self.lbl_distances)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: 1px solid #30363d; border-radius: 4px; background-color: #0d1117; }")
+        scroll.setMinimumHeight(80)
+        
+        form_layout.addRow("", scroll)
+        
+        self.txt_rbn.textChanged.connect(self._update_distances)
+        
+        layout.addLayout(form_layout)
+        
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+        
+        self._update_distances()
+        
+    def _update_distances(self):
+        text = self.txt_rbn.text()
+        calls = [c.strip().upper() for c in text.split(',') if c.strip()]
+        if not calls:
+            self.lbl_distances.setText("Distances: None")
+            return
+            
+        home_grid = self.txt_grid.text().strip().upper()
+        if not home_grid or len(home_grid) < 4:
+            self.lbl_distances.setText("Distances: Needs valid home grid")
+            return
+            
+        from data_engine import maidenhead_to_latlon
+        from propagation_engine import calculate_distance_and_bearing
+        from propagation_engine import CallsignResolver
+        h_lat, h_lon = maidenhead_to_latlon(home_grid)
+        if not h_lat:
+            self.lbl_distances.setText("Distances: Invalid home grid")
+            return
+            
+        res = CallsignResolver()
+        
+        html = '<table style="margin-top: 4px; border-collapse: collapse; width: 100%;" cellpadding="4">'
+        html += '<tr><th align="left" style="color: #8b949e;">Node</th><th align="left" style="color: #8b949e;">Dist</th>'
+        html += '<th align="left" style="color: #8b949e; padding-left: 15px;">Node</th><th align="left" style="color: #8b949e;">Dist</th></tr>'
+        
+        dist_data = []
+        for c in calls:
+            dist_str = "Unknown"
+            loc = res.lookup_user_callsign(c)
+            if loc and loc.grid:
+                c_lat, c_lon = maidenhead_to_latlon(loc.grid)
+                if c_lat and c_lon:
+                    d, _ = calculate_distance_and_bearing(h_lat, h_lon, c_lat, c_lon)
+                    dist_str = f"{int(d * 0.621371)} mi"
+            dist_data.append((c, dist_str))
+            
+        for i in range(0, len(dist_data), 2):
+            c1, d1 = dist_data[i]
+            if i + 1 < len(dist_data):
+                c2, d2 = dist_data[i+1]
+                html += f'<tr><td style="color: #c9d1d9;"><b>{c1}</b></td><td style="color: #8b949e;">{d1}</td>'
+                html += f'<td style="color: #c9d1d9; padding-left: 15px;"><b>{c2}</b></td><td style="color: #8b949e;">{d2}</td></tr>'
+            else:
+                html += f'<tr><td style="color: #c9d1d9;"><b>{c1}</b></td><td style="color: #8b949e;">{d1}</td><td colspan="2"></td></tr>'
+            
+        html += "</table>"
+        self.lbl_distances.setText(html)
+        
+    def auto_find_rbn(self):
+        try:
+            from psk_engine import get_nearest_rbn_node, get_live_local_rbn_nodes
+            from propagation_engine import maidenhead_to_latlon, CallsignResolver
+        except ImportError:
+            return
+            
+        grid = self.txt_grid.text().strip().upper()
+        if not grid:
+            res = CallsignResolver()
+            loc = res.lookup_user_callsign(self.txt_call.text().strip().upper())
+            if loc and loc.grid:
+                grid = loc.grid
+                
+        # 1. Guaranteed fallback regional "super nodes"
+        super_nodes_str = get_nearest_rbn_node(grid)
+        nodes = [c.strip() for c in super_nodes_str.split(",") if c.strip()]
+        
+        # 2. Live scrape for exact local nodes
+        live_nodes = []
+        fetch_success = False
+        error_msg = "No home location found."
+        
+        if grid:
+            h_lat, h_lon = maidenhead_to_latlon(grid)
+            if h_lat is not None and h_lon is not None:
+                try:
+                    live_nodes = get_live_local_rbn_nodes(h_lat, h_lon, max_distance_miles=200.0)
+                    if live_nodes:
+                        fetch_success = True
+                        nodes = live_nodes + nodes
+                    else:
+                        error_msg = "No live skimmers found within 200 miles."
+                except Exception as e:
+                    error_msg = "Network or parsing error."
+                    
+        # deduplicate while preserving order
+        final_nodes = []
+        for n in nodes:
+            if n not in final_nodes:
+                final_nodes.append(n)
+                
+        self.txt_rbn.setText(", ".join(final_nodes))
+        
+        from PyQt6.QtWidgets import QMessageBox
+        if fetch_success:
+            QMessageBox.information(self, "Auto Detect Successful", "Successfully auto-detected regional super-nodes and live local skimmers from the Reverse Beacon Network.")
+        else:
+            QMessageBox.warning(self, "Live Auto Detect Incomplete", f"Failed to retrieve live local skimmers from Reverse Beacon Network ({error_msg})\n\nFell back to assigning guaranteed regional super-nodes instead.")
 
 class DonateDialog(QDialog):
     """
@@ -1091,7 +1577,7 @@ class DonateDialog(QDialog):
                 background-color: #e05350;
             }
         """)
-        kofi_btn.clicked.connect(lambda: webbrowser.open("https://ko-fi.com/"))
+        kofi_btn.clicked.connect(lambda: webbrowser.open("https://ko-fi.com/w7kmc"))
         layout.addWidget(kofi_btn)
 
         # Close button
@@ -1167,6 +1653,7 @@ class AboutDialog(QDialog):
 
         features = [
             "• Live POTA spot & respot stream synchronization with evidence parsing",
+            "• Live RBN & PSKReporter intelligence for empirical skip-zone and SNR verification",
             "• Multi-layer ionospheric modeling (E, F1, F2) & multi-hop ray tracing",
             "• Skip-zone cutoff calculations based on operating frequency and distance",
             "• 750-mile Blitzortung.org lightning stream & ITU-R P.372 QRN noise calculations",
@@ -1264,6 +1751,7 @@ class AboutDialog(QDialog):
         btn_layout.addWidget(close_btn)
 
         main_layout.addLayout(btn_layout)
+
 
 
 class DocumentationDialog(QDialog):
@@ -1453,6 +1941,9 @@ class DocumentationDialog(QDialog):
             <li><b>Nighttime foF2 Decay:</b> At night, reduced solar radiation causes foF2 to drop to 3–5 MHz, leading higher HF bands to penetrate.</li>
             <li><b>Engine Action:</b> When penetration occurs, the engine sets the status to <code>Closed (Skip Zone / Penetration: Freq > Oblique MUF)</code> and adjusts the probability score accordingly.</li>
         </ul>
+        
+        <h3 style="color: #7ee787;">Global Propagation Skip Diagrams:</h3>
+        <p>The interactive map visually graphs these mechanics. Paths that are open via groundwave or forced open by empirical network telemetry are drawn as <b>solid green lines</b>. Paths that suffer from mathematical skip-zone penetration (where the operating frequency exceeds the oblique MUF) are drawn as <b>dashed red lines</b> to visually warn you of the skip-zone.</p>
 
         <hr style="border: 1px solid #30363d;" />
 
@@ -1517,13 +2008,13 @@ class DocumentationDialog(QDialog):
             </tr>
             <tr>
                 <td><b style="color: #f85149;">Level 9</b></td>
-                <td>⚠️ Very Close Proximity</td>
+                <td>Very Close Proximity</td>
                 <td>8–20 miles</td>
                 <td><b>DISCONNECT ADVISORY:</b> Thunderstorms within 20 miles. High risk of electrostatic induction. Disconnect feedlines and rotor cables.</td>
             </tr>
             <tr>
                 <td><b style="color: #ff2a55;">Level 10</b></td>
-                <td>🚨 Immediate Hazard</td>
+                <td>Immediate Hazard</td>
                 <td>&lt; 8 miles</td>
                 <td><b>DANGER:</b> Lightning in immediate vicinity! Unplug all rigs, disconnect feedlines, and disconnect AC power cords immediately.</td>
             </tr>
@@ -1539,7 +2030,7 @@ class DocumentationDialog(QDialog):
         </ul>
 
         <h3 style="color: #7ee787;">4. Open-Meteo Local Weather & 12-Hour Hourly Forecast:</h3>
-        <p>The <b>Local Weather</b> card on the top stats bar displays your current local temperature and weather condition icon (e.g. <code>72°F ⛅ Part Cloud</code>). Hovering your mouse over the card opens a detailed 12-hour hourly forecast popup containing:</p>
+        <p>The <b>Local Weather</b> card on the top stats bar displays your current local temperature and weather condition icon (e.g. <code>72°F Partly Cloudy</code>). Hovering your mouse over the card opens a detailed 12-hour hourly forecast popup containing:</p>
         <ul>
             <li><b>Current Observations:</b> Temperature, condition description, and surface wind vector.</li>
             <li><b>12-Hour Hourly Forecast Table:</b> Displays upcoming hourly predictions for <b>Time (UTC)</b> in 24-hour format, <b>Temp (°F)</b>, <b>Condition</b> icon/description, and <b>Wind (mph &amp; direction)</b>.</li>
@@ -1625,8 +2116,17 @@ class DocumentationDialog(QDialog):
         <h3 style="color: #7ee787;">Automated QRT Detection:</h3>
         <p>When spotters post comments indicating an activator has shut down (e.g. <i>QRT</i>, <i>going QRT</i>, <i>off air</i>, <i>73 QRT</i>), the score is set to <b>0</b> and the status is marked as <b>Activator QRT (Off the air)</b>.</p>
 
-        <h3 style="color: #7ee787;">PSKReporter & WSPR Decodes:</h3>
-        <p>Spot comments referencing live digital decodes (e.g. <i>FT8 decode on PSKReporter in EM98</i>) apply a <b>+15 point PSKReporter Live Opening Boost</b>.</p>
+        <h3 style="color: #7ee787;">IMO Meteor Scatter Telemetry:</h3>
+        <p>POTA Prop actively scrapes the <b>International Meteor Organization (IMO)</b> for live Meteor Shower activity, Zenithal Hourly Rates (ZHR), and shower peak classifications. This is used to model massive +15 point Sporadic-E enhancements on 6m and 10m bands when ZHR exceeds 15 meteors per hour.</p>
+
+        <h3 style="color: #7ee787;">Live Multi-Node PSKReporter Telemetry & Mode Penalty Logic:</h3>
+        <p>POTA Prop incorporates a massive background telemetry engine that continuously interrogates the <b>PSKReporter Network</b> to detect empirical proof of band openings, completely overriding mathematical skip-zones if live propagation is occurring:</p>
+        <ul>
+            <li><b>Multi-Node Proxy Array:</b> You can configure a comma-separated list of regional super-nodes (e.g. <code>W3LPL, K3LR, K9ZO</code>) in the settings. The engine performs round-robin background polling to harvest regional FT8/FT4 decodes across all bands.</li>
+            <li><b>Targeted Activator Sweeps:</b> The engine actively sweeps digital POTA activators every 60 seconds to verify if regional spotters are successfully decoding them.</li>
+            <li><b>Mode Penalty Logic:</b> The engine evaluates the Signal-to-Noise Ratio (SNR) of these live digital decodes to estimate cross-mode viability. Exceptionally strong digital decodes (e.g. >= 0dB) provide massive empirical boosts (+15 points) for SSB targets, while weak decodes are scaled appropriately for CW or ignored for SSB to maintain realistic expectations.</li>
+            <li><b>FIFO Status Message Queue:</b> All of these massive background telemetry events feed into an elegant, non-blocking FIFO queue on the bottom status bar, displaying items cleanly rotating every 5 seconds to prevent overwhelming you.</li>
+        </ul>
 
         <hr style="border: 1px solid #30363d;" />
 
@@ -1777,6 +2277,10 @@ class SpotDialog(QDialog):
         self.txt_comments.setPlaceholderText("Optional comments...")
         form_layout.addRow("Comments:", self.txt_comments)
         
+        self.chk_mark_worked = QCheckBox("Marked Worked")
+        self.chk_mark_worked.setChecked(True)
+        form_layout.addRow("", self.chk_mark_worked)
+        
         layout.addLayout(form_layout)
 
         # Buttons
@@ -1801,6 +2305,246 @@ class SpotDialog(QDialog):
             "comments": self.txt_comments.text().strip()
         }
 
+class MapBackend(QObject):
+    filterChanged = pyqtSignal(str, str, bool)
+    graylineChanged = pyqtSignal(bool)
+    fullscreenToggle = pyqtSignal()
+
+    @pyqtSlot()
+    def toggleFullscreen(self):
+        self.fullscreenToggle.emit()
+
+    @pyqtSlot(str, str, bool)
+    def onFilterChanged(self, band: str, mode: str, show_grayline: bool):
+        self.filterChanged.emit(band, mode, show_grayline)
+
+    @pyqtSlot(bool)
+    def onGraylineChanged(self, show_grayline: bool):
+        self.graylineChanged.emit(show_grayline)
+
+class MapPropagationWorkerSignals(QObject):
+    finished = pyqtSignal(str, str, str) # band, mode, json_data
+
+class MapPropagationWorker(QRunnable):
+    def __init__(self, home_lat: float, home_lon: float, home_grid: str, band: str, mode: str, solar_weather: SolarWeather, tx_power: float, antenna_type: str, lightning: Optional[RegionalLightningSummary], regional_matrix: Optional[RegionalPathMatrix], live_spots: List[Dict]):
+        super().__init__()
+        self.home_lat = home_lat
+        self.home_lon = home_lon
+        self.home_grid = home_grid
+        self.band = band
+        self.mode = mode
+        self.solar_weather = solar_weather
+        self.tx_power = tx_power
+        self.antenna_type = antenna_type
+        self.lightning = lightning
+        self.regional_matrix = regional_matrix
+        self.live_spots = live_spots
+        self.signals = MapPropagationWorkerSignals()
+        
+    def get_band_freq(self, band):
+        mapping = {
+            "160m": 1850.0, "80m": 3900.0, "60m": 5357.0, "40m": 7200.0,
+            "30m": 10120.0, "20m": 14200.0, "17m": 18100.0, "15m": 21300.0,
+            "12m": 24900.0, "10m": 28500.0, "6m": 50150.0
+        }
+        return mapping.get(band, 14200.0)
+
+    @pyqtSlot()
+    def run(self):
+        heatmap_data = []
+        if not self.home_lat or not self.home_lon:
+            self.signals.finished.emit(self.band, "[]")
+            return
+            
+        freq = self.get_band_freq(self.band)
+        
+        def haversine(lat1, lon1, lat2, lon2):
+            R = 6371.0 # Earth radius in km
+            dlat = math.radians(lat2 - lat1)
+            dlon = math.radians(lon2 - lon1)
+            a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+            return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        # Step by 1 degree lat and 2 degrees lon (exact Maidenhead grid square dimensions)
+        for lat in range(-90, 90, 1):
+            for lon in range(-180, 180, 2):
+                # Calculate probability at the exact center of the maidenhead square
+                center_lat = lat + 0.5
+                center_lon = lon + 1.0
+
+                res = calculate_qso_probability(
+                    home_lat=self.home_lat,
+                    home_lon=self.home_lon,
+                    target_lat=center_lat,
+                    target_lon=center_lon,
+                    target_grid=None,
+                    freq_khz=freq,
+                    band=self.band,
+                    mode=self.mode,
+                    solar_weather=self.solar_weather,
+                    tx_power_watts=self.tx_power,
+                    antenna_type=self.antenna_type,
+                    lightning_summary=self.lightning,
+                    regional_matrix=self.regional_matrix
+                )
+                if res and res.probability_pct >= 0:
+                    base_prob = res.probability_pct
+                    
+                    # Blend live spot data using a Gaussian bloom (500-mile / 800km radius of influence)
+                    blended_prob = base_prob
+                    if getattr(self, 'live_spots', None):
+                        max_spot_influence = 0.0
+                        
+                        for spot in self.live_spots:
+                            if abs(center_lat - spot['lat']) > 25.0: continue
+                            
+                            dist_km = haversine(center_lat, center_lon, spot['lat'], spot['lon'])
+                            if dist_km <= 3000.0:
+                                # The bullseye will accurately reflect the spot's calculated score color
+                                active_score = spot['score']
+                                
+                                # Refined Gaussian interpolation (sigma = 300km) to prevent distant high-scoring
+                                # spots from artificially bleeding backwards into the local dead skip-zone.
+                                w = math.exp(-(dist_km**2) / (2 * 300.0**2))
+                                influence = active_score * w
+                                
+                                if influence > max_spot_influence:
+                                    max_spot_influence = influence
+                                
+                        if max_spot_influence > 0:
+                            blended_prob = max(base_prob, max_spot_influence)
+                            blended_prob = max(0.0, min(100.0, blended_prob))
+
+                    # Pass the SW corner (lat, lon) to the map so it can draw the 1x2 degree box accurately
+                    heatmap_data.append([lat, lon, blended_prob / 100.0])
+
+        self.signals.finished.emit(self.band, self.mode, json.dumps(heatmap_data))
+
+class MapWindow(QMainWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("POTA Prop - Live Map")
+        self.resize(1000, 700)
+        self.web_view = QWebEngineView(self)
+        self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        self.setCentralWidget(self.web_view)
+
+        self.backend = MapBackend()
+        self.channel = QWebChannel()
+        self.channel.registerObject("backend", self.backend)
+        self.web_view.page().setWebChannel(self.channel)
+
+        map_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "map.html"))
+        self.web_view.setUrl(QUrl.fromLocalFile(map_path))
+        self.parent_app = parent
+        self.backend.filterChanged.connect(self.on_filter_changed)
+        self.backend.graylineChanged.connect(self.on_grayline_changed)
+        self.backend.fullscreenToggle.connect(self.toggle_fullscreen)
+        self.web_view.loadFinished.connect(self.on_load_finished)
+        
+        # Also allow F11 to toggle fullscreen
+        self.shortcut_fs = QShortcut(QKeySequence("F11"), self)
+        self.shortcut_fs.activated.connect(self.toggle_fullscreen)
+        
+        self.shortcut_esc = QShortcut(QKeySequence("Esc"), self)
+        self.shortcut_esc.activated.connect(self.showNormal)
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def on_load_finished(self, ok):
+        if ok and self.parent_app:
+            home_lat, home_lon = maidenhead_to_latlon(self.parent_app.current_grid)
+            if home_lat is not None and home_lon is not None:
+                self.web_view.page().runJavaScript(f"initMap({home_lat}, {home_lon});")
+            
+            # Sync spots immediately after map is ready
+            map_spots = []
+            for c in self.parent_app.compared_spots:
+                if c.propagation and c.spot.latitude is not None and c.spot.longitude is not None:
+                    if getattr(c.propagation, 'ray_mode', '') == 'QRT' or (c.propagation.spot_evidence and c.propagation.spot_evidence.is_qrt):
+                        continue
+                    has_plus = c.has_local_evidence
+                    map_spots.append({
+                        "lat": c.spot.latitude,
+                        "lon": c.spot.longitude,
+                        "score": c.propagation.probability_pct,
+                        "has_plus": has_plus,
+                        "call": c.spot.activator,
+                        "park": f"{c.spot.reference} ({c.spot.park_name})" if c.spot.park_name else c.spot.reference,
+                        "band": c.spot.band,
+                        "mode": getattr(c.spot, "mode", "SSB"),
+                        "muf": round(c.propagation.muf_est_mhz, 1) if getattr(c.propagation, 'muf_est_mhz', None) else None
+                    })
+            self.update_spots(json.dumps(map_spots))
+            self.update_map_metadata(map_spots)
+            self.parent_app.recalculate_map_heatmap("20m", "SSB")
+            
+    @pyqtSlot(str, str, bool)
+    def on_filter_changed(self, band, mode, show_grayline):
+        if self.parent_app and hasattr(self.parent_app, 'recalculate_map_heatmap'):
+            self.parent_app.recalculate_map_heatmap(band, mode)
+        self.on_grayline_changed(show_grayline)
+            
+    def on_grayline_changed(self, show_grayline):
+        if show_grayline:
+            lines = []
+            def add_line(z, style):
+                p = calculate_grayline_polylines(z)
+                lines.append({"coords": p, "style": style})
+                
+            add_line(90.0, {"color": "black", "weight": 2, "dashArray": ""})
+            add_line(96.0, {"color": "black", "weight": 1, "dashArray": "5, 5"})
+            add_line(84.0, {"color": "#777777", "weight": 1, "dashArray": "5, 5"})
+            
+            self.update_grayline(json.dumps(lines))
+        else:
+            self.update_grayline("[]")
+
+    def update_grayline(self, lines_json):
+        self.web_view.page().runJavaScript(f"updateGrayline({lines_json});")
+
+    def update_spots(self, spots_json):
+        self.web_view.page().runJavaScript(f"if (typeof updateSpots === 'function') updateSpots({spots_json});")
+        
+    def update_map_metadata(self, map_spots):
+        band_parks = {}
+        for spot in map_spots:
+            band = spot["band"]
+            park = spot["park"]
+            if band not in band_parks:
+                band_parks[band] = set()
+            band_parks[band].add(park)
+            
+        band_counts = {band: len(parks) for band, parks in band_parks.items()}
+        band_counts["All"] = len(set(spot["park"] for spot in map_spots))
+        
+        self.web_view.page().runJavaScript(f"if (typeof window.updateBandCounts === 'function') window.updateBandCounts('{json.dumps(band_counts)}');")
+        last_update = datetime.now(timezone.utc).strftime("%H:%M")
+        self.web_view.page().runJavaScript(f"if (typeof window.setLastUpdate === 'function') window.setLastUpdate('{last_update}');")
+        if getattr(self.parent_app, 'lightning_summary', None):
+            self.update_lightning(self.parent_app.lightning_summary)
+
+    def update_heatmap(self, heatmap_json):
+        self.web_view.page().runJavaScript(f"if (typeof updateHeatmap === 'function') updateHeatmap({heatmap_json});")
+        
+    def update_lightning(self, summary):
+        cells = []
+        if summary and hasattr(summary, 'storm_cells') and summary.storm_cells:
+            for c in summary.storm_cells:
+                if c.latitude and c.longitude:
+                    cells.append({
+                        "lat": float(c.latitude),
+                        "lon": float(c.longitude),
+                        "heading": float(c.movement_heading_deg or 0.0),
+                        "speed": float(c.movement_speed_mph or 0.0)
+                    })
+        self.web_view.page().runJavaScript(f"if (typeof window.updateLightning === 'function') window.updateLightning('{json.dumps(cells)}');")
+
 class POTAPropApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1815,12 +2559,25 @@ class POTAPropApp(QMainWindow):
         self.hunted_parks: Dict[str, HuntedPark] = {}
         self.active_spots: List[ActiveSpot] = []
         self.compared_spots: List[ComparedSpot] = []
+        self.psk_spots = []
+        self.regional_matrix = None
+        self.solar_weather = SolarWeather()
 
         self.authenticator = POTAAuthenticator()
         self.authenticator.auth_state_changed.connect(self.on_auth_state_changed)
+        
+        self.map_window = None
+        self.map_timer = QTimer(self)
+        self.map_timer.setInterval(600_000) # 10 minutes
+        self.map_timer.timeout.connect(self.on_map_timer_tick)
 
         # Settings, Operator Call, Grid, Station, P2P Mode, and Filters
         settings = QSettings("POTA", "HunterComparator")
+        self.rbn_nodes_str = settings.value("rbn_nodes_str", settings.value("rbn_node", "W1AW", type=str), type=str)
+        self.rbn_nodes_list = [c.strip().upper() for c in self.rbn_nodes_str.split(',') if c.strip()]
+        if not self.rbn_nodes_list:
+            self.rbn_nodes_list = ["W1AW"]
+        self._current_psk_node_idx = 0
         self.csv_path = str(settings.value("csv_path", DEFAULT_HUNTER_CSV_PATH)).strip() or DEFAULT_HUNTER_CSV_PATH
         self.my_call = str(settings.value("my_call", "")).strip().upper()
         self.home_grid = str(settings.value("home_grid", DEFAULT_HOME_GRID)).strip().upper() or DEFAULT_HOME_GRID
@@ -1857,6 +2614,25 @@ class POTAPropApp(QMainWindow):
         # Auto refresh timer
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.fetch_spots)
+        
+        # PSK Reporter Background Fetch Timer (Round Robin across nodes)
+        self.psk_timer = QTimer(self)
+        self.psk_timer.timeout.connect(self.fetch_psk_spots)
+        interval = max(60000, 900000 // max(1, len(self.rbn_nodes_list)))
+        self.psk_timer.start(interval)
+        QTimer.singleShot(1000, self.fetch_psk_spots)  # Fetch immediately on boot
+
+        # Targeted Activator PSK Polling
+        self.activator_psk_queue = []
+        self.activator_psk_cache = {}
+        self.activator_psk_timer = QTimer(self)
+        self.activator_psk_timer.timeout.connect(self.process_activator_psk_queue)
+        self.activator_psk_timer.start(60000)  # Check queue every 60 seconds
+
+        # Status Message Queue (displays messages for 5s then moves to next)
+        self.status_queue = []
+        self.status_queue_timer = QTimer(self)
+        self.status_queue_timer.timeout.connect(self._process_status_queue)
 
         # Adaptive Startup Lightning Refresh Timer:
         # Every 5 seconds for the first 30 seconds, then every 10 seconds for the next 30 seconds.
@@ -1895,6 +2671,7 @@ class POTAPropApp(QMainWindow):
 
         self.load_initial_csv()
         self.recompute_comparisons()
+        self.fetch_psk_spots()
         self.fetch_spots()
 
     def update_utc_clock(self):
@@ -1984,6 +2761,126 @@ class POTAPropApp(QMainWindow):
         footer_bar = self.create_footer_bar()
         main_layout.addWidget(footer_bar)
 
+    def show_map_window(self):
+        if not self.map_window:
+            self.map_window = MapWindow(self)
+            if not self.map_timer.isActive():
+                self.map_timer.start()
+        self.map_window.show()
+        self.map_window.raise_()
+        self.map_window.activateWindow()
+
+    def on_map_timer_tick(self):
+        if self.map_window and self.map_window.isVisible():
+            # Sync the latest spots to the map
+            map_spots = []
+            for c in self.compared_spots:
+                if c.propagation and c.spot.latitude is not None and c.spot.longitude is not None:
+                    if getattr(c.propagation, 'ray_mode', '') == 'QRT' or (c.propagation.spot_evidence and c.propagation.spot_evidence.is_qrt):
+                        continue
+                    has_plus = c.has_local_evidence
+                    map_spots.append({
+                        "lat": c.spot.latitude,
+                        "lon": c.spot.longitude,
+                        "score": c.propagation.probability_pct,
+                        "has_plus": has_plus,
+                        "call": c.spot.activator,
+                        "park": f"{c.spot.reference} ({c.spot.park_name})" if c.spot.park_name else c.spot.reference,
+                        "band": c.spot.band,
+                        "mode": getattr(c.spot, "mode", "SSB"),
+                        "muf": round(c.propagation.muf_est_mhz, 1) if getattr(c.propagation, 'muf_est_mhz', None) else None
+                    })
+            self.map_window.update_spots(json.dumps(map_spots))
+            self.map_window.update_map_metadata(map_spots)
+            
+            # Tell JS to force a complete recalculation using the new spots and latest time
+            self.map_window.web_view.page().runJavaScript("if (typeof window.forceRefresh === 'function') { window.forceRefresh(); }")
+
+    def recalculate_map_heatmap(self, band: str, mode: str = "SSB"):
+        if band == "All" or not self.map_window:
+            if self.map_window:
+                self.map_window.update_heatmap("[]")
+            return
+            
+        home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
+        if not home_lat or not home_lon:
+            return
+
+        live_spots = []
+        for c in self.compared_spots:
+            if c.spot.band == band and c.propagation and c.spot.latitude is not None and c.spot.longitude is not None:
+                if getattr(c.propagation, 'ray_mode', '') == 'QRT' or (c.propagation.spot_evidence and c.propagation.spot_evidence.is_qrt):
+                    continue
+                    
+                spot_mode = getattr(c.spot, "mode", "SSB").upper()
+                mode_matches = False
+                if mode == "SSB" and spot_mode in ("SSB", "FM", "AM"): mode_matches = True
+                elif mode == "CW" and spot_mode == "CW": mode_matches = True
+                elif mode == "FT8" and spot_mode == "FT8": mode_matches = True
+                elif mode == "FT4" and spot_mode == "FT4": mode_matches = True
+                elif mode == "DATA" and spot_mode not in ("SSB", "FM", "AM", "CW"): mode_matches = True
+                
+                if mode_matches:
+                    live_spots.append({
+                        "lat": float(c.spot.latitude),
+                        "lon": float(c.spot.longitude),
+                        "score": float(c.propagation.probability_pct)
+                    })
+
+        worker = MapPropagationWorker(
+            home_lat=home_lat,
+            home_lon=home_lon,
+            home_grid=self.current_grid,
+            band=band,
+            mode=mode,
+            solar_weather=getattr(self, 'solar_weather', None) or SolarWeather(),
+            tx_power=self.tx_power,
+            antenna_type=self.antenna_type,
+            lightning=getattr(self, 'lightning_summary', None),
+            regional_matrix=getattr(self, 'regional_matrix', None),
+            live_spots=live_spots
+        )
+        worker.signals.finished.connect(self.on_map_heatmap_calculated)
+        
+        if self.map_window:
+            self.map_window.web_view.page().runJavaScript("if (typeof window.setLastUpdate === 'function') window.setLastUpdate('Updating... Standby...');")
+            
+        self._run_worker(worker)
+
+    @pyqtSlot(str, str, str)
+    def on_map_heatmap_calculated(self, band, mode, heatmap_json):
+        if self.map_window:
+            self.map_window.update_heatmap(heatmap_json)
+            from datetime import datetime, timezone
+            last_update = datetime.now(timezone.utc).strftime("%H:%M")
+            self.map_window.web_view.page().runJavaScript(f"if (typeof window.setLastUpdate === 'function') window.setLastUpdate('{last_update}');")
+
+    def show_settings_dialog(self):
+        dlg = SettingsDialog(self)
+        if dlg.exec():
+            new_call = dlg.txt_call.text().strip().upper()
+            new_grid = dlg.txt_grid.text().strip().upper()
+            new_rbn = dlg.txt_rbn.text().strip().upper()
+            
+            if new_call != self.my_call:
+                self.my_call = new_call
+                self.txt_my_call.setText(new_call)
+                self.on_my_call_changed()
+                
+            if new_grid != self.home_grid:
+                self.home_grid = new_grid
+                self.txt_grid.setText(new_grid)
+                self.on_grid_changed()
+                
+            if new_rbn != getattr(self, 'rbn_nodes_str', ''):
+                self.rbn_nodes_str = new_rbn
+                settings = QSettings("POTA", "HunterComparator")
+                settings.setValue("rbn_nodes_str", new_rbn)
+                # Parse list and restart timer
+                self.rbn_nodes_list = [c.strip().upper() for c in new_rbn.split(',') if c.strip()]
+                self._current_psk_node_idx = 0
+                self.fetch_psk_spots()
+
     def create_menu_bar(self):
         menu_bar = self.menuBar()
 
@@ -1999,6 +2896,13 @@ class POTAPropApp(QMainWindow):
         export_action.setShortcut(QKeySequence("Ctrl+S"))
         export_action.triggered.connect(self.export_table_csv)
         file_menu.addAction(export_action)
+
+        file_menu.addSeparator()
+
+        settings_action = QAction("&Preferences...", self)
+        settings_action.setShortcut(QKeySequence("Ctrl+P"))
+        settings_action.triggered.connect(self.show_settings_dialog)
+        file_menu.addAction(settings_action)
 
         file_menu.addSeparator()
 
@@ -2097,7 +3001,7 @@ class POTAPropApp(QMainWindow):
     def _format_noise_tooltip_html(self, matrix: List[BandNoiseBreakdown]) -> str:
         lines = [
             "<div style='font-family: sans-serif; font-size: 11px; color: #e6edf3;'>",
-            "<b style='color: #58a6ff; font-size: 12px;'>📡 Real-Time Receiver Noise Floor Matrix</b><br/>",
+            "<b style='color: #58a6ff; font-size: 12px;'>Real-Time Receiver Noise Floor Matrix</b><br/>",
             "<span style='color: #8b949e;'>ITU-R P.372 Diurnal Baseline &amp; Blitzortung QRN</span><br/><br/>",
             "<table style='border-collapse: collapse; width: 100%; text-align: right;'>",
             "<tr style='color: #8b949e; border-bottom: 1px solid #30363d; font-weight: bold;'>",
@@ -2129,7 +3033,7 @@ class POTAPropApp(QMainWindow):
                 f"</tr>"
             )
         lines.append("</table><br/>")
-        lines.append("<span style='color: #7ee787;'>💡 Click card to open full Noise Matrix window (or press F6)</span>")
+        lines.append("<span style='color: #7ee787;'>Click card to open full Noise Matrix window (or press F6)</span>")
         lines.append("</div>")
         return "".join(lines)
 
@@ -2158,44 +3062,17 @@ class POTAPropApp(QMainWindow):
 
         layout.addSpacing(6)
 
-        # Operator Callsign Input
-        lbl_call = QLabel("My Call:")
-        lbl_call.setStyleSheet("color: #79c0ff; font-weight: bold;")
-        layout.addWidget(lbl_call)
-
+        # Operator Callsign Input (Hidden, moved to Settings)
         self.txt_my_call = QLineEdit(self.my_call)
-        self.txt_my_call.setPlaceholderText("e.g. W8XYZ")
-        self.txt_my_call.setMaxLength(10)
-        self.txt_my_call.setFixedWidth(75)
-        self.txt_my_call.setToolTip("Your amateur radio callsign (automatically looks up your QTH grid for US FCC calls)")
         self.txt_my_call.returnPressed.connect(self.on_my_call_changed)
         self.txt_my_call.editingFinished.connect(self.on_my_call_changed)
-        layout.addWidget(self.txt_my_call)
+        self.txt_my_call.hide()
 
-        layout.addSpacing(4)
-
-        # Single Unified Grid Locator Input
-        lbl_grid = QLabel("Grid:")
-        lbl_grid.setStyleSheet("color: #58a6ff; font-weight: bold;")
-        layout.addWidget(lbl_grid)
-
+        # Single Unified Grid Locator Input (Hidden, moved to Settings)
         self.txt_grid = QLineEdit(self.current_grid)
-        self.txt_grid.setPlaceholderText("e.g. EM98dh")
-        self.txt_grid.setMaxLength(8)
-        self.txt_grid.setFixedWidth(75)
-        self.txt_grid.setToolTip(
-            "Operating Maidenhead Grid Locator (defaults to callsign QTH, or auto-updates to park grid in P2P mode)"
-        )
         self.txt_grid.returnPressed.connect(self.on_grid_changed)
         self.txt_grid.editingFinished.connect(self.on_grid_changed)
-        layout.addWidget(self.txt_grid)
-
-        btn_set_grid = QPushButton("Set")
-        btn_set_grid.setToolTip("Apply and recalculate all distances, bearings, and propagation for this Grid")
-        btn_set_grid.clicked.connect(self.on_grid_changed)
-        layout.addWidget(btn_set_grid)
-
-        layout.addSpacing(6)
+        self.txt_grid.hide()
 
         # P2P Mode Controls
         self.chk_p2p = QCheckBox("P2P Mode")
@@ -2278,28 +3155,30 @@ class POTAPropApp(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        self.card_new = StatCard("Unhunted (New)", "0", "#f1e05a")
-        self.card_hunted = StatCard("Already Hunted", "0", "#2ea043")
-        self.card_active = StatCard("Active Spots", "0", "#58a6ff")
-        self.card_unique_parks = StatCard("Unique Active Parks", "0", "#bc8cff")
+        self.card_new = StatCard("New", "0", "#f1e05a")
+        self.card_hunted = StatCard("Hunted", "0", "#2ea043")
+        self.card_active = StatCard("Spots", "0", "#58a6ff")
+        self.card_unique_parks = StatCard("Active Parks", "0", "#bc8cff")
         self.card_total_hunted = StatCard("Total in Log", "0", "#8b949e")
         self.card_solar = StatCard("Space Weather", "SFI: -- | A: -- | K: -- | Flare: --", "#388bfd")
         self.card_solar.setToolTip(self.solar_weather.format_tooltip_html())
+        self.card_meteor = StatCard("Meteor Activity", "ZHR: -- | Shower: --", "#8b949e")
         self.card_lightning = StatCard("Lightning", "1", "#2ea043")
         self.card_noise = StatCard("Band Noise", "40m: S0 | 20m: S0", "#58a6ff", is_clickable=True)
         self.card_noise.clicked.connect(self.show_band_noise_dialog)
-        self.card_weather = StatCard("Local Weather (Click for Radar)", "--°F", "#58a6ff", is_clickable=True)
+        self.card_weather = StatCard("Weather (Click for Radar)", "--°F", "#58a6ff", is_clickable=True)
         self.card_weather.clicked.connect(self.show_radar_dialog)
 
-        layout.addWidget(self.card_new, stretch=2)
-        layout.addWidget(self.card_hunted, stretch=2)
-        layout.addWidget(self.card_active, stretch=2)
-        layout.addWidget(self.card_unique_parks, stretch=2)
-        layout.addWidget(self.card_total_hunted, stretch=2)
-        layout.addWidget(self.card_solar, stretch=4)
+        layout.addWidget(self.card_new, stretch=1)
+        layout.addWidget(self.card_hunted, stretch=1)
+        layout.addWidget(self.card_active, stretch=1)
+        layout.addWidget(self.card_unique_parks, stretch=1)
+        layout.addWidget(self.card_total_hunted, stretch=1)
+        layout.addWidget(self.card_solar, stretch=11)
+        layout.addWidget(self.card_meteor, stretch=6)
         layout.addWidget(self.card_lightning, stretch=2)
-        layout.addWidget(self.card_noise, stretch=2)
-        layout.addWidget(self.card_weather, stretch=3)
+        layout.addWidget(self.card_noise, stretch=4)
+        layout.addWidget(self.card_weather, stretch=5)
 
         return panel
 
@@ -2446,6 +3325,12 @@ class POTAPropApp(QMainWindow):
         btn_reset.clicked.connect(self.reset_filters)
         layout.addWidget(btn_reset)
 
+        # Live Map button
+        self.btn_map = QPushButton("Live Map")
+        self.btn_map.setStyleSheet("background-color: #238636; color: white; font-weight: bold;")
+        self.btn_map.clicked.connect(self.show_map_window)
+        layout.addWidget(self.btn_map)
+
         return box
 
     @pyqtSlot(bool)
@@ -2548,10 +3433,17 @@ class POTAPropApp(QMainWindow):
         dialog = SpotDialog(activator, ref, freq_khz, mode, self.my_call, self)
         if dialog.exec():
             payload = dialog.get_spot_data()
+            mark_worked = dialog.chk_mark_worked.isChecked()
             self.status_bar.showMessage(f"Submitting spot for {payload['activator']}...")
             
             worker = SpotWorker(payload, token)
-            worker.signals.finished.connect(lambda s: self.status_bar.showMessage("Spot submitted successfully!", 5000))
+            
+            def on_spot_finished(s):
+                self.status_bar.showMessage("Spot submitted successfully!", 5000)
+                if mark_worked:
+                    self.toggle_park_worked(payload["reference"], force_state=True, activator_call=payload["activator"], skip_prompt=True)
+                    
+            worker.signals.finished.connect(on_spot_finished)
             worker.signals.error.connect(lambda e: self.status_bar.showMessage(f"Spot failed: {e}", 5000))
             self.threadpool.start(worker)
 
@@ -2934,20 +3826,174 @@ class POTAPropApp(QMainWindow):
             self.solar_weather = solar_weather
         if lightning_summary is not None:
             self.lightning_summary = lightning_summary
+            
+        # Queue up to 5 digital activators for PSKReporter polling (prioritize VHF/6m)
+        import random
+        digital_spots = [s for s in spots if str(s.mode).upper() in ("FT8", "FT4", "DIGITAL") and not getattr(s, 'is_qrt', False)]
+        
+        def band_priority(s):
+            b = str(s.band).lower()
+            if b in ("6m", "2m", "70cm"): return 0
+            if b in ("160m", "10m", "12m"): return 1
+            return 2
+            
+        digital_spots.sort(key=lambda s: (band_priority(s), random.random()))
+        
+        added = 0
+        for s in digital_spots:
+            if added >= 5:
+                break
+            if s.activator not in self.activator_psk_cache and s.activator not in self.activator_psk_queue:
+                self.activator_psk_queue.append(s.activator)
+                added += 1
+                
         self.recompute_comparisons()
         now_str = datetime.now().strftime("%H:%M:%S")
         light_act = self.lightning_summary.get_activity_level() if self.lightning_summary else None
         light_str = f" | Lightning: Level {light_act.level} ({light_act.label})" if light_act else ""
-        self.status_bar.showMessage(
-            f"Updated spots at {now_str} | {len(spots)} spots received | Solar SFI: {int(self.solar_weather.sfi)}, K: {int(self.solar_weather.k_index)} ({self.solar_weather.condition}){light_str}"
-        )
+        msg = f"Updated spots at {now_str} | {len(spots)} spots received | Solar SFI: {int(self.solar_weather.sfi)}, K: {int(self.solar_weather.k_index)} ({self.solar_weather.condition}){light_str}"
+        self.queue_status_message(msg)
 
-    @pyqtSlot(str)
+    @pyqtSlot()
+    def fetch_psk_spots(self):
+        if not hasattr(self, 'rbn_nodes_list') or not self.rbn_nodes_list:
+            return
+            
+        # Get next node to query
+        if self._current_psk_node_idx >= len(self.rbn_nodes_list):
+            self._current_psk_node_idx = 0
+            
+        node = self.rbn_nodes_list[self._current_psk_node_idx]
+        self._current_psk_node_idx += 1
+        
+        worker = FetchPSKWorker(node)
+        worker.signals.finished.connect(lambda spots, n=node: self.on_psk_fetched(spots, n))
+        self._run_worker(worker)
+
+    @pyqtSlot(list, str)
+    def on_psk_fetched(self, spots, node):
+        if spots:
+            self.psk_spots.extend(spots)
+            
+        # Deduplicate and expire old spots (older than 30 mins)
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        seen = set()
+        unique_spots = []
+        for s in self.psk_spots:
+            age = (now - s.time_utc).total_seconds() / 60.0
+            if age > 30.0:
+                continue
+                
+            key = (s.rx_call, s.tx_call, s.freq_mhz, s.time_utc)
+            if key not in seen:
+                seen.add(key)
+                unique_spots.append(s)
+                
+        self.psk_spots = unique_spots
+        self.recompute_comparisons()
+        
+        decode_count = len(spots) if spots else 0
+        hit_count = 0
+        if spots and hasattr(self, 'active_spots'):
+            active_activators = {s.activator.upper() for s in self.active_spots if hasattr(s, 'activator')}
+            pota_hits = [s for s in spots if s.tx_call.upper() in active_activators]
+            hit_count = len(pota_hits)
+            
+        if hit_count > 0:
+            self.queue_status_message(f"Receiving background telemetry from array: {node} ({decode_count} total decodes | {hit_count} POTA hits!)")
+        else:
+            self.queue_status_message(f"Receiving background telemetry from array: {node} ({decode_count} total decodes | 0 POTA hits)")
+
+    @pyqtSlot()
+    def process_activator_psk_queue(self):
+        if not self.activator_psk_queue:
+            return
+            
+        # Clean cache (remove entries older than 30 mins)
+        now = time.time()
+        self.activator_psk_cache = {k: v for k, v in self.activator_psk_cache.items() if now - v < 1800}
+        
+        # Pull next un-cached activator
+        activator_call = None
+        while self.activator_psk_queue:
+            candidate = self.activator_psk_queue.pop(0)
+            if candidate not in self.activator_psk_cache:
+                activator_call = candidate
+                break
+                
+        if not activator_call:
+            return
+            
+        self.activator_psk_cache[activator_call] = now
+        worker = FetchActivatorPSKWorker(activator_call)
+        worker.signals.finished.connect(self.on_activator_psk_fetched)
+        self._run_worker(worker)
+
+    @pyqtSlot(list)
+    def on_activator_psk_fetched(self, spots):
+        if not spots:
+            return
+            
+        # Filter spots: only keep them if the receiver is somewhat near the hunter (e.g. same region/continent)
+        # Otherwise, an activator heard in Japan will artificially light up the hunter's (in USA) map to Texas.
+        from data_engine import maidenhead_to_latlon
+        from propagation_engine import calculate_distance_and_bearing
+        h_lat, h_lon = maidenhead_to_latlon(self.home_grid)
+        
+        valid_spots = []
+        for s in spots:
+            if not s.rx_grid or len(s.rx_grid) < 4:
+                continue
+            r_lat, r_lon = maidenhead_to_latlon(s.rx_grid)
+            if h_lat and h_lon and r_lat and r_lon:
+                dist, _ = calculate_distance_and_bearing(h_lat, h_lon, r_lat, r_lon)
+                # If the receiver is within 1500km of the hunter, it's regionally relevant
+                if dist <= 1500.0:
+                    valid_spots.append(s)
+                    
+        if not valid_spots:
+            return
+            
+        # Append new spots to our master psk_spots list
+        self.psk_spots.extend(valid_spots)
+        
+        # Deduplicate spots just in case
+        seen = set()
+        unique_spots = []
+        for s in self.psk_spots:
+            key = (s.rx_call, s.tx_call, s.freq_mhz, s.time_utc)
+            if key not in seen:
+                seen.add(key)
+                unique_spots.append(s)
+                
+        self.psk_spots = unique_spots
+        self.recompute_comparisons()
+        
+        # Notify user subtly
+        activator = spots[0].tx_call
+        self.queue_status_message(f"Last targeted sweep: Verified {len(valid_spots)} regional decodes for {activator} via PSKReporter")
+
     def on_spots_error(self, err_msg: str):
         self._is_fetching = False
         self.btn_fetch.setEnabled(True)
         self.btn_fetch.setText("Fetch Spots")
-        self.status_bar.showMessage(f"Fetch Error: {err_msg}")
+        self.status_bar.showMessage(f"Fetch Error: {err_msg}", 5000)
+
+    def queue_status_message(self, msg: str):
+        self.status_queue.append(msg)
+        if not self.status_queue_timer.isActive():
+            self._process_status_queue()
+            self.status_queue_timer.start(5000)
+
+    @pyqtSlot()
+    def _process_status_queue(self):
+        if not self.status_queue:
+            self.status_queue_timer.stop()
+            return
+            
+        msg = self.status_queue.pop(0)
+        self.status_bar.showMessage(msg)
 
     def _on_startup_lightning_tick(self):
         """
@@ -3227,7 +4273,9 @@ class POTAPropApp(QMainWindow):
             tx_power_watts=self.tx_power,
             antenna_type=self.antenna_type,
             op_call=self.my_call,
+            psk_spots=getattr(self, 'psk_spots', [])
         )
+        self.regional_matrix = getattr(compare_active_spots, "last_regional_matrix", None)
 
         # Update stats
         new_count = sum(1 for c in self.compared_spots if c.is_new and self.get_worked_status(c.spot.reference) is None)
@@ -3255,6 +4303,23 @@ class POTAPropApp(QMainWindow):
         self.card_solar.set_accent_color(ov_col)
         self.card_solar.setToolTip(self.solar_weather.format_tooltip_html())
 
+        # Update Meteor Activity card
+        if hasattr(self.solar_weather, 'meteor_activity') and self.solar_weather.meteor_activity:
+            meteor = self.solar_weather.meteor_activity
+            self.card_meteor.set_value(f"ZHR: {meteor.zhr} | {meteor.active_shower}")
+            if meteor.activity_level == "Storm":
+                meteor_col = "#bc8cff" # purple
+            elif meteor.activity_level == "High":
+                meteor_col = "#f85149" # red
+            elif meteor.activity_level == "Moderate":
+                meteor_col = "#d29922" # yellow
+            else:
+                meteor_col = "#8b949e" # gray
+            self.card_meteor.set_accent_color(meteor_col)
+            self.card_meteor.setToolTip(meteor.format_tooltip_html())
+        else:
+            self.card_meteor.set_value("ZHR: -- | Shower: --")
+
         # Update Lightning Activity card (1 to 10 scale)
         if self.lightning_summary is None:
             home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
@@ -3268,6 +4333,9 @@ class POTAPropApp(QMainWindow):
         self.card_lightning.set_value(str(act.level))
         self.card_lightning.set_accent_color(act.color)
         self.card_lightning.setToolTip(self.lightning_summary.format_tooltip_html())
+        
+        if self.map_window and self.map_window.isVisible():
+            self.map_window.update_lightning(self.lightning_summary)
 
         # Update Band Noise Floor card
         h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
@@ -3311,6 +4379,27 @@ class POTAPropApp(QMainWindow):
         else:
             self.combo_mode.setCurrentIndex(0)
         self.combo_mode.blockSignals(False)
+
+        # Update map if active
+        if self.map_window and self.map_window.isVisible():
+            map_spots = []
+            for c in self.compared_spots:
+                if c.propagation and c.spot.latitude is not None and c.spot.longitude is not None:
+                    if getattr(c.propagation, 'ray_mode', '') == 'QRT' or (c.propagation.spot_evidence and c.propagation.spot_evidence.is_qrt):
+                        continue
+                    has_plus = c.has_local_evidence
+                    map_spots.append({
+                        "lat": c.spot.latitude,
+                        "lon": c.spot.longitude,
+                        "score": c.propagation.probability_pct,
+                        "has_plus": has_plus,
+                        "call": c.spot.activator,
+                        "park": f"{c.spot.reference} ({c.spot.park_name})" if c.spot.park_name else c.spot.reference,
+                        "band": c.spot.band,
+                        "mode": getattr(c.spot, "mode", "SSB"),
+                        "muf": round(c.propagation.muf_est_mhz, 1) if getattr(c.propagation, 'muf_est_mhz', None) else None
+                    })
+            self.map_window.update_spots(json.dumps(map_spots))
 
         self.apply_filters()
 
@@ -3411,14 +4500,15 @@ class POTAPropApp(QMainWindow):
         lines.append("<div style='font-family: sans-serif; font-size: 12px; color: #e6edf3; line-height: 1.4; padding: 4px;'>")
 
         # 1. Header: Station, P2P Target, & Park
+        is_same_park = cs.is_p2p_same_park
         if cs.is_p2p_eligible:
-            lines.append(f"<div style='font-size: 14px; font-weight: bold; color: #ff7b72; margin-bottom: 2px;'>🎯 P2P TARGET: {cs.spot.activator}</div>")
+            lines.append(f"<div style='font-size: 14px; font-weight: bold; color: #ff7b72; margin-bottom: 2px;'>P2P TARGET: {cs.spot.activator}</div>")
             lines.append(f"<div style='color: #8b949e; margin-bottom: 4px;'>{cs.spot.reference} - {cs.display_name}<br>Park-to-Park Path from {cs.p2p_my_park or 'Field QTH'}</div>")
-        elif cs.is_p2p_same_park:
-            lines.append(f"<div style='font-size: 14px; font-weight: bold; color: #79c0ff; margin-bottom: 2px;'>🤝 SAME PARK: {cs.spot.activator}</div>")
+        elif is_same_park:
+            lines.append(f"<div style='font-size: 14px; font-weight: bold; color: #79c0ff; margin-bottom: 2px;'>SAME PARK: {cs.spot.activator}</div>")
             lines.append(f"<div style='color: #8b949e; margin-bottom: 4px;'>{cs.spot.reference} - {cs.display_name}</div>")
         else:
-            lines.append(f"<div style='font-size: 14px; font-weight: bold; color: #58a6ff; margin-bottom: 2px;'>📻 STATION: {cs.spot.activator}</div>")
+            lines.append(f"<div style='font-size: 14px; font-weight: bold; color: #58a6ff; margin-bottom: 2px;'>STATION: {cs.spot.activator}</div>")
             lines.append(f"<div style='color: #8b949e; margin-bottom: 4px;'>{cs.spot.reference} - {cs.display_name}</div>")
 
         lines.append(
@@ -3464,6 +4554,10 @@ class POTAPropApp(QMainWindow):
 
         if ev and ev.local_spotters:
             has_nearby = True
+            lines.append("<table style='margin-left: 8px; margin-bottom: 2px; border-collapse: collapse; width: 95%;'>")
+            lines.append("<tr style='border-bottom: 1px solid #30363d; color: #8b949e; text-align: left;'>")
+            lines.append("<th style='padding: 2px 4px;'>Callsign</th><th style='padding: 2px 4px;'>Method</th><th style='padding: 2px 4px;'>Dist/Age</th></tr>")
+            
             respot_map = {}
             for r in cs.spot.respots or []:
                 call = str(r.get("spotter") or "").strip().upper()
@@ -3473,20 +4567,32 @@ class POTAPropApp(QMainWindow):
             for s in ev.local_spotters:
                 r = respot_map.get(s.callsign.upper(), {})
                 comment = str(r.get("comments") or "").strip()
-                time_raw = str(r.get("spotTime") or "")
-                time_str = f" [{time_raw.replace('T', ' ')[11:16]}z]" if time_raw else ""
+                
+                dist_str = f"{int(s.distance_miles)}mi" if s.distance_miles is not None else ""
+                
+                age_str = ""
+                if hasattr(s, 'age_mins') and s.age_mins is not None:
+                    age_str = f"{int(s.age_mins)}m ago"
+                else:
+                    time_raw = str(r.get("spotTime") or "")
+                    if time_raw:
+                        age_str = f"[{time_raw.replace('T', ' ')[11:16]}z]"
+                
+                dist_age_val = f"{dist_str} {age_str}".strip()
 
-                loc_parts = []
-                if s.state:
-                    loc_parts.append(s.state)
-                if s.grid:
-                    loc_parts.append(s.grid)
-                if s.distance_miles is not None:
-                    loc_parts.append(f"{int(s.distance_miles)} mi")
-                loc_desc = f" ({', '.join(loc_parts)})" if loc_parts else ""
-
-                comment_desc = f" &mdash; <i style='color: #a5d6ff;'>\"{comment}\"</i>" if comment else ""
-                lines.append(f"<div style='margin-left: 8px; margin-bottom: 2px;'>• <b>{s.callsign}</b><span style='color: #8b949e;'>{loc_desc}{time_str}</span>{comment_desc}</div>")
+                method_val = getattr(s, 'method', 'POTA Spot')
+                if getattr(s, 'snr', None) is not None:
+                    method_val += f" ({s.snr:+.0f}dB)"
+                
+                comment_desc = f" title='{comment}'" if comment else ""
+                
+                lines.append(f"<tr{comment_desc}>")
+                lines.append(f"<td style='padding: 2px 4px;'><b>{s.callsign}</b></td>")
+                lines.append(f"<td style='padding: 2px 4px; color: #a5d6ff;'>{method_val}</td>")
+                lines.append(f"<td style='padding: 2px 4px; color: #8b949e;'>{dist_age_val}</td>")
+                lines.append("</tr>")
+            
+            lines.append("</table>")
 
         if ev and ev.local_state_mentions:
             if not has_nearby:
@@ -3505,7 +4611,9 @@ class POTAPropApp(QMainWindow):
                 lines.append(f"<div style='margin-bottom: 2px;'><b>Signal Reports:</b> {', '.join(ev.signal_reports)}</div>")
             if ev.empirical_boost_pct != 0:
                 sign = "+" if ev.empirical_boost_pct > 0 else ""
-                lines.append(f"<div style='margin-bottom: 2px;'><b>Local Evidence Boost:</b> <span style='color: #3fb950;'>{sign}{ev.empirical_boost_pct}%</span></div>")
+                lines.append(f"<div style='margin-bottom: 2px;'><b>Score Boost:</b> <span style='color: #3fb950;'>{sign}{ev.empirical_boost_pct}</span></div>")
+                if ev.evidence_summary:
+                    lines.append(f"<div style='margin-bottom: 2px; color: #8b949e; font-size: 11px;'><i>{ev.evidence_summary}</i></div>")
             if len(cs.spot.respots) > 1:
                 lines.append(f"<div style='margin-bottom: 2px;'><b>Total Respots:</b> {len(cs.spot.respots)}</div>")
 
@@ -3610,24 +4718,18 @@ class POTAPropApp(QMainWindow):
             prob = cs.dx_percentage
             has_local = cs.has_local_evidence
             if prob >= 99:
-                # Exceptional: rare confluence of grayline + mode + evidence + solar
-                prob_text = f"{prob} !"
-                prob_color = "#FFD700"  # Gold
+                prob_text = f"{prob} !" if has_local else f"{prob}"
+                prob_color = "#2ea043"  # Green
             elif prob >= 75:
                 prob_text = f"{prob} +" if has_local else f"{prob}"
-                prob_color = "#3fb950"  # Bright vibrant green
+                prob_color = "#d29922"  # Yellow
             elif prob >= 50:
                 prob_text = f"{prob} +" if has_local else f"{prob}"
-                prob_color = "#e3b341"  # Bright amber
-            elif prob >= 25:
-                prob_text = f"{prob} +" if has_local else f"{prob}"
-                prob_color = "#db6d28"  # Orange
-            elif prob > 0:
-                prob_text = f"{prob} +" if has_local else f"{prob}"
-                prob_color = "#8b949e"  # Gray
+                prob_color = "#f78166"  # Orange
             else:
-                prob_text = "0"
-                prob_color = "#f85149"  # Red
+                prob_text = "0" if prob == 0 else f"{prob}"
+                if has_local and prob > 0: prob_text += " +"
+                prob_color = "#da3633"  # Red
 
             item_dx = NumericTableWidgetItem(prob_text, float(prob))
             item_dx.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3897,7 +4999,7 @@ class POTAPropApp(QMainWindow):
         layout.addLayout(btn_layout)
         dlg.exec()
 
-    def toggle_park_worked(self, park_ref: str, force_state: Optional[bool] = None, activator_call: str = ""):
+    def toggle_park_worked(self, park_ref: str, force_state: Optional[bool] = None, activator_call: str = "", skip_prompt: bool = False):
         ref = normalize_ref(park_ref)
         if not ref:
             return
@@ -3920,7 +5022,7 @@ class POTAPropApp(QMainWindow):
         settings.setValue("manually_worked_parks", dict(self.manually_worked_parks))
         self.recompute_comparisons()
 
-        if is_now_worked:
+        if is_now_worked and not skip_prompt:
             self.prompt_spot_on_pota(ref, activator_call)
 
     def toggle_selected_park_worked(self):
@@ -4163,6 +5265,8 @@ class POTAPropApp(QMainWindow):
         self.refresh_timer.stop()
         if hasattr(self, "startup_lightning_timer") and self.startup_lightning_timer.isActive():
             self.startup_lightning_timer.stop()
+        if hasattr(self, "status_queue_timer") and self.status_queue_timer.isActive():
+            self.status_queue_timer.stop()
         if hasattr(self, "utc_clock_timer") and self.utc_clock_timer.isActive():
             self.utc_clock_timer.stop()
         if hasattr(self, "utc_rollover_timer") and self.utc_rollover_timer.isActive():

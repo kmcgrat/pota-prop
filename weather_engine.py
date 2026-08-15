@@ -19,40 +19,40 @@ logger = logging.getLogger(__name__)
 
 # WMO Weather Interpretation Codes (WW) mapping to (Description, Emoji/Icon, Short Label)
 WMO_WEATHER_CODES = {
-    0: ("Clear Sky", "☀️", "Clear"),
-    1: ("Mainly Clear", "🌤️", "Mainly Clear"),
-    2: ("Partly Cloudy", "⛅", "Part Cloud"),
-    3: ("Overcast", "☁️", "Overcast"),
-    45: ("Foggy", "🌫️", "Fog"),
-    48: ("Depositing Rime Fog", "🌫️", "Rime Fog"),
-    51: ("Light Drizzle", "🌧️", "Lt Drizzle"),
-    53: ("Moderate Drizzle", "🌧️", "Drizzle"),
-    55: ("Dense Drizzle", "🌧️", "Hvy Drizzle"),
-    56: ("Light Freezing Drizzle", "🌧️", "Frz Drizzle"),
-    57: ("Dense Freezing Drizzle", "🌧️", "Hvy Frz Drz"),
-    61: ("Slight Rain", "🌧️", "Light Rain"),
-    63: ("Moderate Rain", "🌧️", "Rain"),
-    65: ("Heavy Rain", "🌧️", "Heavy Rain"),
-    66: ("Light Freezing Rain", "🌧️", "Lt Frz Rain"),
-    67: ("Heavy Freezing Rain", "🌧️", "Hvy Frz Rain"),
-    71: ("Slight Snow", "❄️", "Light Snow"),
-    73: ("Moderate Snow", "❄️", "Snow"),
-    75: ("Heavy Snow", "❄️", "Heavy Snow"),
-    77: ("Snow Grains", "❄️", "Snow Grains"),
-    80: ("Slight Rain Showers", "🌦️", "Lt Showers"),
-    81: ("Moderate Rain Showers", "🌦️", "Showers"),
-    82: ("Violent Rain Showers", "🌦️", "Hvy Showers"),
-    85: ("Slight Snow Showers", "🌨️", "Lt Snw Shwr"),
-    86: ("Heavy Snow Showers", "🌨️", "Hvy Snw Shwr"),
-    95: ("Thunderstorm", "🌩️", "T-Storm"),
-    96: ("Thunderstorm w/ Slight Hail", "🌩️", "T-Storm/Hail"),
-    99: ("Thunderstorm w/ Heavy Hail", "🌩️", "T-Storm/Hail"),
+    0: ("Clear Sky", "", "Clear"),
+    1: ("Mainly Clear", "", "Mainly Clear"),
+    2: ("Partly Cloudy", "", "Partly Cloudy"),
+    3: ("Overcast", "", "Overcast"),
+    45: ("Foggy", "", "Fog"),
+    48: ("Depositing Rime Fog", "", "Rime Fog"),
+    51: ("Light Drizzle", "", "Light Drizzle"),
+    53: ("Moderate Drizzle", "", "Drizzle"),
+    55: ("Dense Drizzle", "", "Heavy Drizzle"),
+    56: ("Light Freezing Drizzle", "", "Frz Drizzle"),
+    57: ("Dense Freezing Drizzle", "", "Hvy Frz Drizzle"),
+    61: ("Slight Rain", "", "Light Rain"),
+    63: ("Moderate Rain", "", "Rain"),
+    65: ("Heavy Rain", "", "Heavy Rain"),
+    66: ("Light Freezing Rain", "", "Light Frz Rain"),
+    67: ("Heavy Freezing Rain", "", "Heavy Frz Rain"),
+    71: ("Slight Snow", "", "Light Snow"),
+    73: ("Moderate Snow", "", "Snow"),
+    75: ("Heavy Snow", "", "Heavy Snow"),
+    77: ("Snow Grains", "", "Snow Grains"),
+    80: ("Slight Rain Showers", "", "Light Showers"),
+    81: ("Moderate Rain Showers", "", "Showers"),
+    82: ("Violent Rain Showers", "", "Heavy Showers"),
+    85: ("Slight Snow Showers", "", "Light Snow Shwr"),
+    86: ("Heavy Snow Showers", "", "Heavy Snow Shwr"),
+    95: ("Thunderstorm", "", "T-Storm"),
+    96: ("Thunderstorm w/ Slight Hail", "", "T-Storm / Hail"),
+    99: ("Thunderstorm w/ Heavy Hail", "", "T-Storm / Hail"),
 }
 
 
 def get_wmo_info(code: int) -> Tuple[str, str, str]:
     """Returns (description, icon, short_label) for a given WMO weather code."""
-    return WMO_WEATHER_CODES.get(code, ("Unknown", "🌡️", "Unknown"))
+    return WMO_WEATHER_CODES.get(code, ("Unknown", "", "Unknown"))
 
 
 def degrees_to_cardinal(deg: Optional[float]) -> str:
@@ -76,6 +76,7 @@ class HourlyForecastItem:
     wind_speed_mph: float
     wind_dir_deg: float
     wind_dir_cardinal: str
+    humidity_pct: int
 
     @property
     def time_display(self) -> str:
@@ -94,6 +95,7 @@ class CurrentWeatherItem:
     wind_speed_mph: float
     wind_dir_deg: float
     wind_dir_cardinal: str
+    humidity_pct: int
 
 
 @dataclass
@@ -116,7 +118,7 @@ class WeatherForecastSummary:
         if self.location_name:
             lines.append(
                 f"<div style='color: #7ee787; font-size: 11px; font-weight: bold; margin-bottom: 4px;'>"
-                f"📍 Location: {self.location_name}</div>"
+                f"Location: {self.location_name}</div>"
             )
 
         if self.current:
@@ -126,13 +128,13 @@ class WeatherForecastSummary:
             )
             lines.append(
                 f"<div style='color: #8b949e; margin-bottom: 8px; font-size: 11px;'>"
-                f"Wind: <b>{int(round(self.current.wind_speed_mph))} mph</b> from <b>{self.current.wind_dir_cardinal}</b> ({int(round(self.current.wind_dir_deg))}°)"
+                f"Wind: <b>{int(round(self.current.wind_speed_mph))} mph</b> from <b>{self.current.wind_dir_cardinal}</b> ({int(round(self.current.wind_dir_deg))}°) | Humidity: <b>{self.current.humidity_pct}%</b>"
                 f"</div>"
             )
         else:
             lines.append(
                 "<div style='font-size: 14px; font-weight: bold; color: #58a6ff; margin-bottom: 4px;'>"
-                "🌤️ Local Weather Forecast</div>"
+                "Local Weather Forecast</div>"
             )
             if self.error_message:
                 lines.append(f"<div style='color: #f85149; margin-bottom: 8px;'>Error: {self.error_message}</div>")
@@ -147,6 +149,7 @@ class WeatherForecastSummary:
                 "<tr style='color: #8b949e; border-bottom: 1px solid #30363d;'>"
                 "<th style='text-align: left; padding: 2px 8px 2px 0;'>Time (UTC)</th>"
                 "<th style='text-align: left; padding: 2px 8px;'>Temp</th>"
+                "<th style='text-align: left; padding: 2px 8px;'>Hum</th>"
                 "<th style='text-align: left; padding: 2px 8px;'>Precip</th>"
                 "<th style='text-align: left; padding: 2px 8px;'>Condition</th>"
                 "<th style='text-align: left; padding: 2px 0;'>Wind</th>"
@@ -157,9 +160,10 @@ class WeatherForecastSummary:
                     f"<tr>"
                     f"<td style='padding: 2px 8px 2px 0; color: #8b949e;'>{item.time_display}</td>"
                     f"<td style='padding: 2px 8px; color: #7ee787; font-weight: bold;'>{int(round(item.temp_f))}°F</td>"
-                    f"<td style='padding: 2px 8px; color: #58a6ff;'>{item.precip_prob}%</td>"
+                    f"<td style='padding: 2px 8px; color: #58a6ff;'>{item.humidity_pct}%</td>"
+                    f"<td style='padding: 2px 8px; color: #79c0ff;'>{item.precip_prob}%</td>"
                     f"<td style='padding: 2px 8px;'>{item.weather_icon} {item.weather_desc}</td>"
-                    f"<td style='padding: 2px 0; color: #c9d1d9;'>{int(round(item.wind_speed_mph))} mph {item.wind_dir_cardinal}</td>"
+                    f"<td style='padding: 2px 0;'>{int(round(item.wind_speed_mph))} mph {item.wind_dir_cardinal}</td>"
                     f"</tr>"
                 )
             lines.append("</table>")
@@ -235,8 +239,8 @@ class WeatherEngine:
         params = {
             "latitude": f"{lat:.4f}",
             "longitude": f"{lon:.4f}",
-            "current": "temperature_2m,weather_code,wind_speed_10m,wind_direction_10m",
-            "hourly": "temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m",
+            "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m",
+            "hourly": "temperature_2m,relative_humidity_2m,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m",
             "forecast_hours": "16",  # fetch slightly more to slice next 12 hours from current time
             "temperature_unit": "fahrenheit",
             "wind_speed_unit": "mph",
@@ -260,6 +264,7 @@ class WeatherEngine:
                         w_code = int(c_data.get("weather_code", 0))
                         w_speed = float(c_data.get("wind_speed_10m", 0.0))
                         w_dir = float(c_data.get("wind_direction_10m", 0.0))
+                        humidity_pct = int(c_data.get("relative_humidity_2m", 0))
 
                         desc, icon, short_lbl = get_wmo_info(w_code)
                         summary.current = CurrentWeatherItem(
@@ -271,6 +276,7 @@ class WeatherEngine:
                             wind_speed_mph=w_speed,
                             wind_dir_deg=w_dir,
                             wind_dir_cardinal=degrees_to_cardinal(w_dir),
+                            humidity_pct=humidity_pct,
                         )
 
                     # Parse Hourly Forecast
@@ -282,6 +288,7 @@ class WeatherEngine:
                         codes = h_data.get("weather_code", [])
                         speeds = h_data.get("wind_speed_10m", [])
                         dirs = h_data.get("wind_direction_10m", [])
+                        hums = h_data.get("relative_humidity_2m", [])
 
                         now_utc = datetime.now(timezone.utc)
                         items: List[HourlyForecastItem] = []
@@ -309,6 +316,7 @@ class WeatherEngine:
                                         wind_speed_mph=float(speeds[i]),
                                         wind_dir_deg=float(dirs[i]),
                                         wind_dir_cardinal=w_cardinal,
+                                        humidity_pct=int(hums[i]) if i < len(hums) else 0,
                                     )
                                 )
                                 if len(items) >= 12:

@@ -2,7 +2,7 @@
 
 A desktop GUI application built in Python and PyQt6 for amateur radio operators participating in **Parks on the Air (POTA)**.
 
-It compares your historical hunted parks export against live active spots on [pota.app](https://pota.app), highlighting which active activators represent **NEW (unhunted)** parks versus parks you have already worked, and calculates an estimated **QSO Success Probability (Score)** based on ionospheric propagation modeling, ray tracing, skip-zone physics, live space weather, and regional lightning noise (QRN).
+It compares your hunted parks export against active spots on [pota.app](https://pota.app), highlighting which active activators represent **NEW (unhunted)** parks versus parks you have already worked, and calculates an estimated **QSO Success Probability (Score)** based on ionospheric propagation modeling, ray tracing, skip-zone physics, live space weather, and regional lightning noise (QRN).
 
 ---
 
@@ -18,10 +18,21 @@ It compares your historical hunted parks export against live active spots on [po
   - **Open-Meteo Local Weather & 12-Hour Hourly Forecast**: Top dashboard card displaying current temperature and weather condition icon (`72°F ⛅`). Mouseover popup opens a 12-hour hourly forecast table with **Time (UTC)** in 24-hour format, temperature (°F), weather condition icons/descriptions, wind vectors, and Open-Meteo attribution.
   - **Receiver Band Noise Floor Matrix (ITU-R P.372-16)**: Full 11-band noise floor engine (160m to 6m) modeling diurnal day/night atmospheric noise curves, cosmic/galactic background, man-made baselines, and live Blitzortung lightning QRN surges with standard IARU S-meter calibration ($S9 = -73\text{ dBm}$, $6\text{ dB/S-unit}$). Accessible via top dashboard stat card or **F6** hotkey.
   - **Station Link Budget & SNR Estimation**: Incorporates transmitter power (Watts to dBW), antenna radiation patterns (Dipole, End-Fed, Vertical, Loop, Random Wire, 3-Element Beam), free-space path loss ($L_{\text{bf}}$), ionospheric absorption ($L_a$) with geomagnetic gyrofrequency ($f_H = 1.4\text{ MHz}$), and ground reflection losses ($L_g$).
-  - **Live Space Weather**: Background worker pulls 10.7cm Solar Flux Index (SFI), planetary K-index, planetary A-index, and GOES Satellite 0.1–0.8nm X-ray flux (solar flare monitoring R1–R5) from NOAA SWPC.
-  - **Automated QRT Detection & Real-Time Decodes**: Adjusts QSO Score when spot comments indicate an activator is QRT (off the air), and adds score adjustments (+15) for PSKReporter and WSPR live decodes.
-  - **Grayline Enhancement**: Applies path adjustments when either endpoint or the path midpoint aligns with the solar terminator.
-  - **VHF/UHF Line-of-Sight & 6m Es Modeling**: Bounds 2m/70cm to tropospheric line-of-sight range (~150 km max) and detects summer Sporadic-E skip paths for 6m.
+  - **Live Space Weather & Meteor Telemetry**: Background worker pulls 10.7cm Solar Flux Index (SFI), planetary K-index, planetary A-index, and GOES Satellite 0.1–0.8nm X-ray flux from NOAA SWPC. Also actively scrapes the **International Meteor Organization (IMO)** for live Meteor Shower activity (ZHR and shower peak data) to model 6m and 10m Sporadic-E enhancements.
+  - **Automated QRT Detection & Empirical Overrides**: Adjusts QSO Score when spot comments indicate an activator is QRT (off the air). Integrates live network telemetry to override mathematical skip-zones:
+    - **Live PSKReporter & RBN Intelligence Array**: Continuously polls a configurable comma-separated list of regional proxy receiver nodes (including live-scraped active RBN nodes within 200 miles) in a round-robin background thread to map live RF propagation across your region.
+    - **Targeted Activator Sweeps**: Dynamically sweeps active digital POTA activators every 60 seconds to verify if regional spotters are successfully decoding them.
+    - **Mode Penalty Logic**: Evaluates the Signal-to-Noise Ratio (SNR) of live FT8/FT4 decodes to estimate cross-mode viability. Exceptionally strong digital decodes (e.g. >= 0dB) provide massive empirical boosts (+15 points) for SSB targets, while weak decodes are scaled appropriately for CW or ignored for SSB to maintain realistic expectations.
+    - **Grayline Enhancement**: Applies path adjustments when either endpoint or the path midpoint aligns with the solar terminator.
+    - VHF/UHF Line-of-Sight & 6m Es Modeling: Bounds 2m/70cm to tropospheric line-of-sight range (~150 km max) and detects summer Sporadic-E skip paths for 6m.
+- **Global Interactive Propagation Map**:
+  - Visually maps your real-time 100W link budget and QSO probabilities globally across the earth's surface using mathematically modeled 1x2 degree Maidenhead grid squares.
+  - Generates smooth color gradients (Red -> Orange -> Yellow -> Green) mapped directly to your physics engine probabilities.
+  - Features **Propagation Skip Diagrams**: Displays dashed red lines for paths mathematically closed due to skip-zone penetration, and solid green lines for groundwave paths or paths forced open by live empirical network telemetry.
+  - Live POTA spots generate massive Gaussian interpolation blooms (sigma = 1200km radius) radiating across the map to visualize regional openings. Hover over any map balloon to view the estimated **Maximum Usable Frequency (MUF)** for that specific path!
+  - Automatically recalculates and forces a UI refresh every 15 minutes as Grayline terminator geometry and Space Weather conditions drift.
+  - Fully interactive Leaflet.js map with opacity sliders and native Full-Screen capability (F11 / Esc) for multi-monitor viewing.
+- **Live Weather Radar Dialog**: Interactive Windy.com weather radar mapping natively embedded with a fullscreen toggle for severe weather tracking.
 - **Interactive Multi-Filter Controls**:
   - **Status Filter**: View *All*, *New*, *Hunted*, *Worked*, or *P2P*.
   - **QSO Score Filter**: Filter by *All (0+)*, *>= 25 (Possible)*, *>= 50 (Good)*, *>= 75 (High)*, or *>= 99 (Exceptional)*.
@@ -29,13 +40,14 @@ It compares your historical hunted parks export against live active spots on [po
   - **Mode Filter**: Filter by CW, SSB, FT8, FT4, FM, AM, Digital, etc.
   - **Instant Search**: Real-time search across Park ID, Park Name, Activator Callsign, Location/State, Grid, or Spotter Comments.
 - **Summary Metric Cards**: Live counters for Unhunted Spots, Hunted Spots, Total Spots, Unique Active Parks, Total Parks in Log, Live NOAA Space Weather (SFI / K-Index), Regional Lightning Activity (1–10 Threat Scale), and Receiver Band Noise Floor (S-units).
-- **Interactive Table & Resizable Columns**:
+  - **Interactive Table & Resizable Columns**:
   - **13 Detailed Columns**: Status, `Score`, Activator, Frequency, Time, Park ID, Park Name, Location/State, Band, Mode, Distance & Bearing, Grid, Comments.
   - **Local Verification (`+` Symbol)**: Scores featuring a `+` (e.g. `85+`) indicate local spotter verification confirming nearby spotters in your region hear the signal.
-  - **Interactive Diagnostics**: Hover over any `Score` badge or table row to see full path diagnostics (Ray Mode, Launch Angle, Path Loss, Predicted SNR, MUF, Lightning QRN Surge, Space Weather).
+  - **Interactive Diagnostics**: Hover over any `Score` badge or table row to see full path diagnostics (Ray Mode, Launch Angle, Path Loss, Predicted SNR, MUF, Lightning QRN Surge, Space Weather, and Empirical Network Data).
   - **Adjustable Column Widths**: Drag any column header boundary to resize columns.
   - **Auto-Fit & Reset**: Right-click any column header to access `Auto-fit All Column Widths` or `Reset Column Widths to Default`.
   - **Persistent Layout**: Custom column widths, window geometry, and home grid are automatically saved and restored across sessions.
+  - **FIFO Status Message Queue**: Background telemetry (POTA spots, PSK fetches, Weather updates) elegantly feed into a localized status queue, displaying non-blocking 5-second rotating updates on the bottom status bar without overwhelming the user.
   - **Double-click any row** to open the Spot Intelligence & Respot History window.
   - **Right-click context menu (rows)**:
     - Open Park on pota.app
@@ -72,7 +84,7 @@ cd /path/to/POTA
 
 Or execute directly with Python:
 ```bash
-python3 pota_hunter.py
+python3 pota_prop.py
 ```
 
 ---
@@ -95,7 +107,7 @@ pip install -r requirements.txt
 
 Run the test suite:
 ```bash
-python3 test_pota_hunter.py
+python3 test_pota_prop.py
 ```
 
 ---
