@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>POTA Prop Map</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background-color: #161b22;
+        }
+        #map {
+            height: 100%;
+            width: 100%;
+        }
+        .leaflet-container {
+            background-color: #161b22;
+        }
+        
+        /* Custom map markers */
+        .spot-marker {
+            border-radius: 50%;
+            border: 2px solid white;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+            text-align: center;
+            color: white;
+            font-weight: bold;
+            font-size: 10px;
+            line-height: 20px;
+        }
+        .score-exceptional { background-color: #2ea043; } /* Green */
+        .score-high { background-color: #d29922; } /* Yellow */
+        .score-good { background-color: #f78166; } /* Orange */
+        .score-poor { background-color: #da3633; } /* Red */
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<script>
+    window.onerror = function(msg, url, lineNo, columnNo, error) {
+        var err = document.createElement('div');
+        err.style.cssText = 'color:red; background:white; z-index:9999; position:absolute; top:0; left:0; padding:10px; border:2px solid red;';
+        err.innerHTML = 'JS Error: ' + msg + '<br>Line: ' + lineNo;
+        document.body.appendChild(err);
+        return false;
+    };
+</script>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<!-- Removed Leaflet Heatmap Plugin -->
+<!-- QWebChannel to communicate with PyQt6 -->
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+
+<script>
+    var map;
+    var heatLayer;
+    var markersLayer = L.layerGroup();
+    var currentBand = "20m";
+    var currentMode = "SSB";
+    var graylineLines = [];
+
+    // All spots data
+    var spotsData = [];
+    var backend = null;
+    var lightLayer;
+    var darkLayer;
+
+    function initMap(lat, lon) {
+        map = L.map('map', {
+            center: [lat, lon],
+            zoom: 3,
+            worldCopyJump: true,
+            preferCanvas: true
+        });
+
+        // OpenStreetMap tiles
+        lightLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+        });
+        
+        darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+        });
+
+        // Add light layer by default
+        lightLayer.addTo(map);
+        
+        // Add home marker
+        L.marker([lat, lon], {
+            icon: L.divIcon({
+                className: 'spot-marker',
+                html: '<div style="background-color: #58a6ff; width: 10px; height: 10px; border-radius: 50%; margin: 5px;"></div>',
+                iconSize: [24, 24]
+            })
+        }).bindPopup("<b>Home QTH</b>").addTo(map);
+
+        markersLayer.addTo(map);
+
+        // Map Control for Band selection
+        var legend = L.control({position: 'topright'});
+        legend.onAdd = function (map) {
+            var div = L.DomUtil.create('div', 'info legend');
+            div.style.backgroundColor = 'rgba(22, 27, 34, 0.8)';
+            div.style.padding = '10px';
+            div.style.borderRadius = '5px';
+            div.style.color = 'white';
+            div.style.fontFamily = 'sans-serif';
+            div.style.fontSize = '12px';
+            
+            div.innerHTML = '<div id="controls">' +
+                            '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">' +
+                            '<div style="font-weight: bold; font-size: 14px;">Propagation Band</div>' +
+                            '<button onclick="if(backend) backend.toggleFullscreen()" style="background: #30363d; border: 1px solid #8b949e; color: #c9d1d9; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 12px;" title="Toggle Fullscreen (F11)">⛶</button>' +
+                            '</div>' +
+                            '<select id="band-select" style="margin-top: 5px; margin-bottom: 10px; width: 100%;" onchange="window.updateFilters()">' +
+                            '<option value="All">All Spots (No Heatmap)</option>' +
+                            '<option value="160m">160m</option>' +
+                            '<option value="80m">80m</option>' +
+                            '<option value="60m">60m</option>' +
+                            '<option value="40m">40m</option>' +
+                            '<option value="30m">30m</option>' +
+                            '<option value="20m" selected>20m</option>' +
+                            '<option value="17m">17m</option>' +
+                            '<option value="15m">15m</option>' +
+                            '<option value="12m">12m</option>' +
+                            '<option value="10m">10m</option>' +
+                            '<option value="6m">6m</option>' +
+                            '</select>' +
+                            '<b>Propagation Mode</b><br>' +
+                            '<select id="mode-select" style="margin-top: 5px; width: 100%;" onchange="window.updateFilters()">' +
+                            '<option value="SSB">SSB (Voice)</option>' +
+                            '<option value="CW">CW (Morse)</option>' +
+                            '<option value="FT8">FT8 (Digital)</option>' +
+                            '<option value="FT4">FT4 (Digital)</option>' +
+                            '</select>' +
+                            '<div style="margin-top: 10px;"><b>Heatmap Opacity</b></div>' +
+                            '<input type="range" id="opacity-slider" min="0" max="1" step="0.1" value="0.8" style="width: 100%;" oninput="window.changeOpacity(this.value)">' +
+                            '<div style="margin-top: 10px;">' +
+                            '<div style="margin-top: 10px;">' +
+                            '<label><input type="checkbox" id="darkmap-check" onchange="window.toggleDarkMode()"> Dark Map Mode</label><br>' +
+                            '<label><input type="checkbox" id="grayline-check" onchange="window.updateFilters()"> Show Grayline</label><br>' +
+                            '<label><input type="checkbox" id="lightning-check" onchange="window.updateLightningVisibility()"> Show Lightning Cells</label>' +
+                            '</div>' +
+                            '<div id="hover-score" style="margin-top: 10px; font-weight: bold; color: #58a6ff; text-align: center; height: 16px;">Hover map for score</div>' +
+                            '<div id="last-update" style="margin-top: 10px; font-size: 11px; color: #8b949e; text-align: center;"></div>';
+            return div;
+        };
+        legend.addTo(map);
+
+        // Connect to PyQt WebChannel
+        if (typeof QWebChannel !== "undefined") {
+            new QWebChannel(qt.webChannelTransport, function (channel) {
+                backend = channel.objects.backend;
+                console.log("Connected to Python backend.");
+            });
+        }
+    }
+
+    window.changeOpacity = function(val) {
+        // Adjust the opacity of the SVG or Canvas pane that contains our grid rectangles
+        var renderers = document.querySelectorAll('.leaflet-overlay-pane svg, .leaflet-overlay-pane canvas');
+        renderers.forEach(function(el) {
+            el.style.opacity = val;
+        });
+    };
+    
+    window.toggleDarkMode = function() {
+        var isDark = document.getElementById('darkmap-check').checked;
+        if (isDark) {
+            if (map.hasLayer(lightLayer)) map.removeLayer(lightLayer);
+            darkLayer.addTo(map);
+        } else {
+            if (map.hasLayer(darkLayer)) map.removeLayer(darkLayer);
+            lightLayer.addTo(map);
+        }
+    };
+
+    window.setLastUpdate = function(timeStr) {
+        var el = document.getElementById('last-update');
+        if (el) {
+            if (timeStr.includes("Updating")) {
+                el.innerHTML = timeStr;
+            } else {
+                el.innerHTML = "Last Updated: " + timeStr + " UTC";
+            }
+        }
+    };
+
+    window.updateBandCounts = function(counts_json) {
+        try {
+            var counts = JSON.parse(counts_json);
+            var select = document.getElementById('band-select');
+            if (!select) return;
+            for (var i = 0; i < select.options.length; i++) {
+                var opt = select.options[i];
+                var band = opt.value;
+                var c = counts[band] || 0;
+                if (band === "All") {
+                    opt.text = "All Spots (" + c + " Parks)";
+                } else {
+                    opt.text = band + " (" + c + ")";
+                }
+            }
+        } catch(e) {}
+    };
+
+    var lightningLayer = L.layerGroup();
+    var currentLightningData = [];
+    
+    window.updateLightningVisibility = function() {
+        lightningLayer.clearLayers();
+        if (document.getElementById('lightning-check') && document.getElementById('lightning-check').checked && currentLightningData.length > 0) {
+            currentLightningData.forEach(function(cell) {
+                var html = '';
+                if (cell.speed > 0) {
+                    html = '<div style="transform: rotate(' + (cell.heading - 90) + 'deg); color: #ffffff; font-size: 24px; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0px 0px 6px black;">➤</div>';
+                } else {
+                    html = '<div style="color: #ffffff; font-size: 20px; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0px 0px 6px black;">⚡</div>';
+                }
+                var icon = L.divIcon({
+                    className: 'lightning-marker',
+                    html: html,
+                    iconSize: [20, 20],
+                    iconAnchor: [10, 10]
+                });
+                var marker = L.marker([cell.lat, cell.lon], {icon: icon});
+                marker.bindPopup("<b>Lightning Cluster</b><br>Speed: " + Math.round(cell.speed) + " mph");
+                marker.addTo(lightningLayer);
+            });
+            if (!map.hasLayer(lightningLayer)) {
+                lightningLayer.addTo(map);
+            }
+        } else {
+            if (map.hasLayer(lightningLayer)) {
+                map.removeLayer(lightningLayer);
+            }
+        }
+    };
+
+    window.updateLightning = function(cells_json) {
+        try {
+            currentLightningData = JSON.parse(cells_json);
+            window.updateLightningVisibility();
+        } catch(e) {}
+    };
+
+    window.updateFilters = function() {
+        var band = document.getElementById('band-select').value;
+        var mode = document.getElementById('mode-select').value;
+        var showGrayline = document.getElementById('grayline-check').checked;
+        
+        var physicsChanged = (band !== currentBand || mode !== currentMode);
+        
+        currentBand = band;
+        currentMode = mode;
+        renderSpots();
+        
+        if (backend) {
+            if (physicsChanged) {
+                if (heatLayer) {
+                    map.removeLayer(heatLayer);
+                    heatLayer = null;
+                }
+                backend.onFilterChanged(band, mode, showGrayline);
+            } else {
+                backend.onGraylineChanged(showGrayline);
+            }
+        }
+    };
+    
+    window.forceRefresh = function() {
+        var band = document.getElementById('band-select').value;
+        var mode = document.getElementById('mode-select').value;
+        var showGrayline = document.getElementById('grayline-check').checked;
+        
+        currentBand = band;
+        currentMode = mode;
+        renderSpots();
+        
+        if (backend) {
+            if (heatLayer) {
+                map.removeLayer(heatLayer);
+                heatLayer = null;
+            }
+            backend.onFilterChanged(band, mode, showGrayline);
+        }
+    };
+    
+    function updateGrayline(lines_json) {
+        graylineLines.forEach(function(l) { map.removeLayer(l); });
+        graylineLines = [];
+        
+        if (lines_json && lines_json.length > 0) {
+            lines_json.forEach(function(lineObj) {
+                if (lineObj.coords && lineObj.coords.length > 0) {
+                    var offsets = [0, -360.0, 360.0];
+                    offsets.forEach(function(offset) {
+                        // Support both MultiPolylines (array of array of points) and simple polylines
+                        var isMulti = Array.isArray(lineObj.coords[0]) && Array.isArray(lineObj.coords[0][0]);
+                        var shiftedCoords = [];
+                        if (isMulti) {
+                            shiftedCoords = lineObj.coords.map(function(segment) {
+                                return segment.map(function(pt) { return [pt[0], pt[1] + offset]; });
+                            });
+                        } else {
+                            shiftedCoords = lineObj.coords.map(function(pt) { return [pt[0], pt[1] + offset]; });
+                        }
+                        var l = L.polyline(shiftedCoords, lineObj.style).addTo(map);
+                        graylineLines.push(l);
+                    });
+                }
+            });
+        }
+    }
+
+    function getScoreClass(score) {
+        if (score >= 99) return 'score-exceptional';
+        if (score >= 75) return 'score-high';
+        if (score >= 50) return 'score-good';
+        return 'score-poor';
+    }
+
+    function renderSpots() {
+        markersLayer.clearLayers();
+        
+        spotsData.forEach(function(spot) {
+            if (currentBand === "All" || spot.band === currentBand) {
+                var modeMatches = false;
+                if (!spot.mode) {
+                    modeMatches = true;
+                } else {
+                    var m = spot.mode.toUpperCase();
+                    if (currentMode === "SSB" && (m === "SSB" || m === "FM" || m === "AM")) modeMatches = true;
+                    else if (currentMode === "CW" && m === "CW") modeMatches = true;
+                    else if (currentMode === "FT8" && m === "FT8") modeMatches = true;
+                    else if (currentMode === "FT4" && m === "FT4") modeMatches = true;
+                    else if (currentMode === "DATA" && (m !== "SSB" && m !== "FM" && m !== "AM" && m !== "CW" && m !== "FT8" && m !== "FT4")) modeMatches = true;
+                    else if (currentMode === "ALL") modeMatches = true;
+                }
+                
+                if (!modeMatches) {
+                    return; // Skip rendering this spot since it doesn't match the selected mode
+                }
+
+                var cssClass = getScoreClass(spot.score);
+                var iconHtml = spot.has_plus ? '<span style="color:white; font-size:11px; font-weight:bold; line-height:14px; display:block; text-align:center;">+</span>' : '';
+                var icon = L.divIcon({
+                    className: 'spot-marker ' + cssClass,
+                    iconSize: [14, 14],
+                    html: iconHtml
+                });
+
+                var marker = L.marker([spot.lat, spot.lon], {icon: icon});
+                var scoreStr = spot.has_plus ? spot.score + "+" : spot.score;
+                
+                var mufStr = "";
+                if (spot.muf) {
+                    var mufColor = "";
+                    if (spot.muf >= 28) mufColor = "#2ea043";
+                    else if (spot.muf >= 18) mufColor = "#d29922";
+                    else mufColor = "#da3633";
+                    
+                    var mufDot = '<span style="display:inline-block; width:10px; height:10px; border-radius:50%; background-color:' + mufColor + '; margin-left:4px; vertical-align:middle;"></span>';
+                    mufStr = "<br>Path MUF: " + spot.muf.toFixed(1) + " MHz" + mufDot;
+                }
+                
+                marker.bindPopup("<b>" + spot.call + "</b><br>" + spot.park + "<br>Band: " + spot.band + " | Mode: " + (spot.mode || "Unknown") + "<br>Score: " + scoreStr + mufStr);
+                markersLayer.addLayer(marker);
+            }
+        });
+    }
+
+    function updateSpots(spots_json) {
+        try {
+            if (typeof spots_json === 'string') {
+                spotsData = JSON.parse(spots_json);
+            } else {
+                spotsData = spots_json;
+            }
+            renderSpots();
+        } catch (e) {
+            console.error("Error parsing spots JSON: " + e);
+        }
+    }
+
+    function updateHeatmap(heatmap_json) {
+        try {
+            var data;
+            if (typeof heatmap_json === 'string') {
+                data = JSON.parse(heatmap_json);
+            } else {
+                data = heatmap_json;
+            }
+            
+            if (heatLayer) {
+                map.removeLayer(heatLayer);
+            }
+            
+            // Draw precise grid rectangles instead of a density heatmap to avoid overlapping addition artifacts
+            var gridGroup = L.layerGroup();
+            
+            function interpolateColor(c1, c2, factor) {
+                var r1 = parseInt(c1.substring(1,3), 16), g1 = parseInt(c1.substring(3,5), 16), b1 = parseInt(c1.substring(5,7), 16);
+                var r2 = parseInt(c2.substring(1,3), 16), g2 = parseInt(c2.substring(3,5), 16), b2 = parseInt(c2.substring(5,7), 16);
+                var r = Math.round(r1 + factor * (r2 - r1));
+                var g = Math.round(g1 + factor * (g2 - g1));
+                var b = Math.round(b1 + factor * (b2 - b1));
+                return "#" + (1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1);
+            }
+            
+            function getGradientColor(s) {
+                if (s >= 100) return '#2ea043';
+                if (s >= 50) return interpolateColor('#d29922', '#2ea043', (s - 50) / 50.0); // 50 to 100 is Yellow to Green
+                if (s >= 25) return interpolateColor('#f78166', '#d29922', (s - 25) / 25.0); // 25 to 50 is Orange to Yellow
+                return interpolateColor('#da3633', '#f78166', s / 25.0);                      // 0 to 25 is Red to Orange
+            }
+            
+            data.forEach(function(pt) {
+                var lat = pt[0];
+                var lon = pt[1];
+                var score = Math.min(100.0, Math.max(0.0, pt[2] * 100.0));
+                
+                var color = getGradientColor(score);
+                
+                // The python backend sends the South-West corner of the Maidenhead square (1 deg lat, 2 deg lon)
+                var offsets = [0, -360.0, 360.0];
+                offsets.forEach(function(offset) {
+                    var bounds = [[lat, lon + offset], [lat + 1.0, lon + offset + 2.0]];
+                    var rect = L.rectangle(bounds, {
+                        color: color,
+                        weight: 0,
+                        fillColor: color,
+                        fillOpacity: 0.8
+                    });
+                    rect.on('mouseover', function(e) {
+                        var el = document.getElementById('hover-score');
+                        if (el) el.innerHTML = "Propagation Score: " + Math.round(score) + "%";
+                    });
+                    rect.on('mouseout', function(e) {
+                        var el = document.getElementById('hover-score');
+                        if (el) el.innerHTML = "Hover map for score";
+                    });
+                    rect.addTo(gridGroup);
+                });
+            });
+            
+            heatLayer = gridGroup.addTo(map);
+
+            // Set initial opacity from slider
+            var slider = document.getElementById('opacity-slider');
+            if (slider) {
+                window.changeOpacity(slider.value);
+            }
+        } catch (e) {
+            console.error("Error parsing heatmap JSON: " + e);
+        }
+    }
+</script>
+
+</body>
+</html>
