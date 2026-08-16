@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             artifact_name: pota-prop-linux-x86_64
           - os: windows-latest
             artifact_name: pota-prop-windows-x64

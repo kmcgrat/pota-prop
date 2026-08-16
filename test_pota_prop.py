@@ -540,7 +540,29 @@ class TestPOTAComparatorGUIHeadless(unittest.TestCase):
         dlg.txt_call.setText("W1AW")
         dlg.on_callsign_editing_finished()
         window.threadpool.waitForDone(2000)
-        # Should have updated the home grid textbox in SettingsDialog to FN31PR
+        # Should have updated the grid location textbox in SettingsDialog to FN31PR
+        self.assertEqual(dlg.txt_grid.text().upper(), "FN31PR")
+
+        # Test P2P mode checkbox & park auto grid update
+        dlg.chk_start_p2p.setChecked(True)
+        self.assertTrue(dlg.txt_p2p_park.isEnabled())
+        dlg.txt_p2p_park.setText("US-1845")
+        dlg.on_p2p_park_editing_finished()
+        window.threadpool.waitForDone(2000)
+        self.assertEqual(dlg.txt_grid.text().upper(), "EM70AG")
+
+        # Uncheck P2P mode - should revert back to callsign QTH
+        dlg.chk_start_p2p.setChecked(False)
+        self.assertFalse(dlg.txt_p2p_park.isEnabled())
+        window.threadpool.waitForDone(2000)
+        self.assertEqual(dlg.txt_grid.text().upper(), "FN31PR")
+
+        # Swap back to P2P mode again - should instantly restore EM70AG
+        dlg.chk_start_p2p.setChecked(True)
+        self.assertEqual(dlg.txt_grid.text().upper(), "EM70AG")
+
+        # Swap back to Home mode again - should instantly restore FN31PR
+        dlg.chk_start_p2p.setChecked(False)
         self.assertEqual(dlg.txt_grid.text().upper(), "FN31PR")
 
         # Clean up
@@ -1531,11 +1553,9 @@ class TestStationPropagationModeling(unittest.TestCase):
             LightningEngine,
             StrikeBuffer,
             LightningStrike,
-            reset_lightning_engine_location,
-            _GLOBAL_LIGHTNING_ENGINE,
         )
 
-        engine = _GLOBAL_LIGHTNING_ENGINE
+        engine = LightningEngine()
         # Add some initial strikes for location 1 (EM98)
         engine.strike_buffer.add_strike(
             LightningStrike(
@@ -1551,10 +1571,10 @@ class TestStationPropagationModeling(unittest.TestCase):
         # Now reset location to Florida (EL98: ~28.5, -81.4)
         if engine.stream_thread and hasattr(engine.stream_thread, "stop"):
             engine.stream_thread.stop()
-        summary = reset_lightning_engine_location(28.5, -81.4)
+        engine.reset_home_location(28.5, -81.4)
         self.assertAlmostEqual(engine.current_home_lat, 28.5)
         self.assertAlmostEqual(engine.current_home_lon, -81.4)
-        self.assertIsNotNone(summary)
+        self.assertEqual(len(engine.strike_buffer.get_all_strikes()), 0)
 
     def test_gui_callsign_and_grid_change_triggers_lightning_reset(self):
         """Test that GUI callsign lookup and grid change update the lightning summary to new location."""
@@ -1940,7 +1960,7 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
 
         window = POTAPropApp()
         self.assertIsNotNone(window.card_weather)
-        self.assertEqual(window.card_weather.lbl_title.text(), "WEATHER (CLICK FOR RADAR)")
+        self.assertEqual(window.card_weather.lbl_title.text(), "WEATHER")
 
         summary = WeatherForecastSummary(
             current=CurrentWeatherItem(
@@ -1989,6 +2009,35 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
         window.threadpool.clear()
         window.threadpool.waitForDone(2000)
         window.close()
+
+    def test_is_chromebook_crostini_detection(self):
+        """Test Chromebook environment detection."""
+        from pota_prop import is_chromebook_crostini
+        res = is_chromebook_crostini()
+        self.assertIsInstance(res, bool)
+
+    def test_chromebook_map_server_dispatch(self):
+        """Test that POTAPropApp creates MapServerManager and pushes data when is_chromebook is True."""
+        from unittest.mock import patch
+        from pota_prop import POTAPropApp
+        
+        with patch("pota_prop.is_chromebook_crostini", return_value=True):
+            window = POTAPropApp()
+            self.assertTrue(window.is_chromebook)
+            self.assertIsNotNone(window.map_server)
+            self.assertTrue(window.map_server.port > 0)
+            
+            # Test pushing data
+            window.push_all_data_to_map()
+            self.assertIn("spots", window.map_server.map_data)
+            
+            # Test browser filter signal emission
+            window.browser_filter_signal.emit("40m", "CW", True)
+            self.assertEqual(window.map_server.map_data.get("band"), "40m")
+            self.assertEqual(window.map_server.map_data.get("mode"), "CW")
+            
+            # Cleanup
+            window.close()
 
 
 if __name__ == "__main__":

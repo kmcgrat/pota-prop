@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Handle requests in a separate thread."""
-    pass
+    daemon_threads = True
 
 class MapHTTPRequestHandler(BaseHTTPRequestHandler):
     auth_token = ""
@@ -20,7 +20,8 @@ class MapHTTPRequestHandler(BaseHTTPRequestHandler):
         "home_lat": 38.3125,
         "home_lon": -81.7083,
         "spots": [],
-        "heatmap": [],
+        "heatmap": "[]",
+        "band_counts": {},
         "band": "20m",
         "mode": "SSB",
         "grayline": [],
@@ -28,7 +29,6 @@ class MapHTTPRequestHandler(BaseHTTPRequestHandler):
         "lightning": []
     }
     
-    # Callback to signal the main PyQt app that a filter changed
     on_filter_changed_cb = None
 
     def log_message(self, format, *args):
@@ -36,10 +36,9 @@ class MapHTTPRequestHandler(BaseHTTPRequestHandler):
         pass
         
     def _send_cors_headers(self):
-        # Allow requests from localhost
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-type, X-Map-Token')
+        self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, X-Map-Token')
 
     def do_OPTIONS(self):
         self.send_response(200, "ok")
@@ -72,17 +71,19 @@ class MapHTTPRequestHandler(BaseHTTPRequestHandler):
             if req_token != self.auth_token:
                 self.send_response(403)
                 self.end_headers()
+                self.wfile.write(b"Forbidden")
                 return
                 
             band = query.get("band", [""])[0]
             mode = query.get("mode", [""])[0]
             grayline_str = query.get("grayline", ["false"])[0].lower()
-            show_grayline = grayline_str == "true"
+            show_grayline = (grayline_str == "true")
             
             if MapHTTPRequestHandler.on_filter_changed_cb:
-                # Trigger callback in main thread
-                # This could be called from another thread, but PyQt handles signal emissions fine.
-                MapHTTPRequestHandler.on_filter_changed_cb(band, mode, show_grayline)
+                try:
+                    MapHTTPRequestHandler.on_filter_changed_cb(band, mode, show_grayline)
+                except Exception as e:
+                    logger.error(f"Error executing on_filter_changed_cb: {e}")
                 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -92,7 +93,7 @@ class MapHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         # Serve static map.html file
-        if path in ("/", "/map.html"):
+        if path in ("/", "/map.html", "/index.html"):
             if token != self.auth_token:
                 self.send_response(403)
                 self.end_headers()
@@ -102,7 +103,7 @@ class MapHTTPRequestHandler(BaseHTTPRequestHandler):
             file_path = os.path.join(self.resources_dir, "map.html")
             if os.path.exists(file_path):
                 self.send_response(200)
-                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 with open(file_path, "rb") as f:
                     self.wfile.write(f.read())
@@ -131,6 +132,8 @@ class MapServerManager:
         MapHTTPRequestHandler.on_filter_changed_cb = cb
 
     def start(self):
+        if self.server:
+            return
         self.server = ThreadedHTTPServer(("127.0.0.1", 0), MapHTTPRequestHandler)
         self.port = self.server.server_address[1]
         
@@ -144,7 +147,15 @@ class MapServerManager:
     def update_data(self, key: str, value):
         MapHTTPRequestHandler.map_data[key] = value
 
+    @property
+    def map_data(self):
+        return MapHTTPRequestHandler.map_data
+
     def stop(self):
         if self.server:
-            self.server.shutdown()
-            self.server.server_close()
+            try:
+                self.server.shutdown()
+                self.server.server_close()
+            except Exception:
+                pass
+            self.server = None

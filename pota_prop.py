@@ -8,21 +8,41 @@ Compares your hunted parks history against live POTA active spots.
 import csv
 import os
 import sys
-from map_server import MapServerManager
 import time
 import json
+import socket
 import webbrowser
 import logging
 import math
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 
-APP_VERSION = "26.8.14-rc3"
+from map_server import MapServerManager
+
+APP_VERSION = "26.8.16-rc1"
 
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+
+
+def is_chromebook_crostini() -> bool:
+    """Detect if running inside ChromeOS / Crostini Linux container."""
+    if os.path.exists('/proc/version'):
+        try:
+            with open('/proc/version', 'r') as f:
+                content = f.read().lower()
+                if 'cros-kernel' in content or 'chromium.org' in content:
+                    return True
+        except Exception:
+            pass
+    try:
+        if socket.gethostname() == 'penguin':
+            return True
+    except Exception:
+        pass
+    return False
 
 
 from PyQt6.QtCore import (
@@ -660,70 +680,6 @@ class StatCard(QFrame):
             f"color: {accent_color}; font-size: {font_size}; font-weight: 800;"
         )
 
-
-class WeatherRadarDialog(QDialog):
-    """
-    Live Weather Radar dialog embedding a Windy.com interactive radar map centered on the user's location.
-    """
-    def __init__(self, home_lat: float, home_lon: float, parent=None):
-        super().__init__(parent, Qt.WindowType.Window | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
-        self.setWindowTitle("Live Weather Radar (Windy.com)")
-        self.resize(1000, 750)
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        
-        self.web_view = QWebEngineView(self)
-        layout.addWidget(self.web_view)
-        
-        # Floating fullscreen button overlay
-        self.btn_fs = QPushButton("⛶", self)
-        self.btn_fs.setFixedSize(36, 36)
-        self.btn_fs.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(22, 27, 34, 0.85);
-                color: white;
-                border: 2px solid rgba(255, 255, 255, 0.2);
-                border-radius: 6px;
-                font-size: 16px;
-                font-weight: bold;
-                padding: 0px;
-            }
-            QPushButton:hover {
-                background-color: rgba(48, 54, 61, 1.0);
-                border-color: rgba(255, 255, 255, 0.5);
-            }
-        """)
-        self.btn_fs.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_fs.clicked.connect(self.toggle_fullscreen)
-        
-        # Shortcuts
-        self.shortcut_fs = QShortcut(QKeySequence("F11"), self)
-        self.shortcut_fs.activated.connect(self.toggle_fullscreen)
-        self.shortcut_esc = QShortcut(QKeySequence("Esc"), self)
-        self.shortcut_esc.activated.connect(self.showNormal)
-        
-        # Build Windy Embed URL
-        url = (
-            f"https://embed.windy.com/embed2.html?lat={home_lat}&lon={home_lon}"
-            f"&zoom=7&level=surface&overlay=radar&menu=&message=&marker=&calendar=&pressure=&type=map"
-            f"&location=coordinates&detail=&detailLat={home_lat}&detailLon={home_lon}"
-            f"&metricWind=mph&metricTemp=f&radarRange=-1"
-        )
-        self.web_view.setUrl(QUrl(url))
-        
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # Keep the floating button in the top right corner
-        self.btn_fs.move(self.width() - self.btn_fs.width() - 10, 10)
-        self.btn_fs.raise_()
-
-    def toggle_fullscreen(self):
-        if self.isFullScreen():
-            self.showNormal()
-        else:
-            self.showFullScreen()
 
 class BandNoiseDialog(QDialog):
     """
@@ -1433,19 +1389,39 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.resize(500, 350)
-        self.setMinimumSize(450, 250)
+        self.resize(520, 420)
+        self.setMinimumSize(450, 300)
+        
+        # Track both Home QTH Grid and P2P Park Grid in memory
+        self._home_qth_grid = ""
+        if parent and getattr(parent, 'home_grid', None):
+            self._home_qth_grid = parent.home_grid.strip().upper()
+        if not self._home_qth_grid:
+            self._home_qth_grid = DEFAULT_HOME_GRID
+
+        self._p2p_park_grid = ""
+        initial_p2p_park = getattr(parent, 'p2p_my_park', '') if parent else ''
+        if initial_p2p_park:
+            active_spots = getattr(parent, 'active_spots', []) if parent else []
+            info = fetch_park_info(initial_p2p_park, active_spots)
+            if info and info.get("grid"):
+                self._p2p_park_grid = info["grid"]
+        
+        start_p2p_val = bool(getattr(parent, 'p2p_mode', False)) if parent else False
+        if start_p2p_val and parent and getattr(parent, 'current_grid', None):
+            self._p2p_park_grid = parent.current_grid.strip().upper()
         
         layout = QVBoxLayout(self)
         form_layout = QFormLayout()
         
-        self.txt_call = QLineEdit(parent.my_call)
+        self.txt_call = QLineEdit(parent.my_call if parent else "")
         self.txt_call.setPlaceholderText("e.g. W8XYZ")
         form_layout.addRow("Operator Callsign:", self.txt_call)
         
-        # Single Unified Grid Locator Input with Set Mobile/Temp button
+        # Grid Location Input with Set Mobile/Temp button
         grid_layout = QHBoxLayout()
-        self.txt_grid = QLineEdit(parent.home_grid)
+        current_grid_val = self._p2p_park_grid if start_p2p_val else self._home_qth_grid
+        self.txt_grid = QLineEdit(current_grid_val or DEFAULT_HOME_GRID)
         self.txt_grid.setPlaceholderText("e.g. EM98dh")
         self.txt_grid.setMaxLength(6)
         
@@ -1455,10 +1431,26 @@ class SettingsDialog(QDialog):
         
         grid_layout.addWidget(self.txt_grid)
         grid_layout.addWidget(self.btn_mobile)
-        form_layout.addRow("Home Grid Locator:", grid_layout)
+        form_layout.addRow("Grid Location:", grid_layout)
+
+        # Startup Mode (At Home vs P2P Mode)
+        self.chk_start_p2p = QCheckBox("Start in P2P Mode")
+        self.chk_start_p2p.setChecked(start_p2p_val)
+        self.chk_start_p2p.setStyleSheet("color: #bc8cff; font-weight: bold;")
+        self.chk_start_p2p.setToolTip("Enable Park-to-Park (P2P) mode automatically on application startup")
+        self.chk_start_p2p.toggled.connect(self.on_start_p2p_toggled)
+        form_layout.addRow("Startup Mode:", self.chk_start_p2p)
+
+        self.txt_p2p_park = QLineEdit(initial_p2p_park)
+        self.txt_p2p_park.setPlaceholderText("e.g. US-1845 or K-1845")
+        self.txt_p2p_park.setToolTip("Enter your P2P park reference to automatically update your Grid Location")
+        self.txt_p2p_park.setEnabled(start_p2p_val)
+        self.txt_p2p_park.textEdited.connect(self.on_p2p_park_text_edited)
+        self.txt_p2p_park.editingFinished.connect(self.on_p2p_park_editing_finished)
+        form_layout.addRow("P2P Field Park:", self.txt_p2p_park)
         
         rbn_layout = QHBoxLayout()
-        self.txt_rbn = QLineEdit(getattr(parent, 'rbn_nodes_str', "W1AW"))
+        self.txt_rbn = QLineEdit(getattr(parent, 'rbn_nodes_str', "W1AW") if parent else "W1AW")
         self.txt_rbn.setPlaceholderText("e.g. W1AW, K3LR, N4ZR")
         
         btn_find = QPushButton("Auto-Find Nearest")
@@ -1493,10 +1485,72 @@ class SettingsDialog(QDialog):
         
         self._update_distances()
 
+    def on_start_p2p_toggled(self, checked: bool):
+        self.txt_p2p_park.setEnabled(checked)
+        if checked:
+            # Instantly swap to P2P park grid if known
+            if self._p2p_park_grid:
+                self.txt_grid.setText(self._p2p_park_grid)
+            if self.txt_p2p_park.text().strip():
+                self.on_p2p_park_editing_finished()
+        else:
+            # Instantly swap back to Home QTH grid
+            if self._home_qth_grid:
+                self.txt_grid.setText(self._home_qth_grid)
+            self._last_looked_up_call = None
+            self.on_callsign_editing_finished()
+
+    def on_p2p_park_text_edited(self, text: str):
+        cleaned = normalize_ref(text)
+        if len(cleaned) >= 4:
+            active_spots = getattr(self.parent(), 'active_spots', []) if self.parent() else []
+            info = fetch_park_info(cleaned, active_spots)
+            if info and info.get("grid"):
+                self._p2p_park_grid = info["grid"]
+                if self.chk_start_p2p.isChecked():
+                    self.txt_grid.setText(info["grid"])
+
+    def on_p2p_park_editing_finished(self):
+        raw_park = self.txt_p2p_park.text().strip()
+        if not raw_park:
+            return
+        norm_ref = normalize_ref(raw_park)
+        self.txt_p2p_park.setText(norm_ref)
+        
+        active_spots = getattr(self.parent(), 'active_spots', []) if self.parent() else []
+        info = fetch_park_info(norm_ref, active_spots)
+        if info and info.get("grid"):
+            self._p2p_park_grid = info["grid"]
+            if self.chk_start_p2p.isChecked():
+                self.txt_grid.setText(info["grid"])
+        else:
+            worker = ParkLookupWorker(norm_ref, active_spots)
+            worker.signals.finished.connect(self.on_p2p_park_lookup_finished)
+            if self.parent() and hasattr(self.parent(), "threadpool"):
+                self.parent().threadpool.start(worker)
+
+    def on_p2p_park_lookup_finished(self, info: dict):
+        if info and info.get("grid"):
+            self._p2p_park_grid = info["grid"]
+            if self.chk_start_p2p.isChecked():
+                self.txt_grid.setText(info["grid"])
+
     def on_callsign_editing_finished(self):
         call = self.txt_call.text().strip().upper()
         if not call:
             return
+            
+        try:
+            from propagation_engine import CallsignResolver
+            res = CallsignResolver()
+            loc = res.lookup_user_callsign(call)
+            if loc and loc.grid:
+                self._home_qth_grid = loc.grid
+                if not self.chk_start_p2p.isChecked():
+                    self.txt_grid.setText(loc.grid)
+                return
+        except Exception:
+            pass
             
         if hasattr(self, "_last_looked_up_call") and self._last_looked_up_call == call:
             return
@@ -1509,7 +1563,9 @@ class SettingsDialog(QDialog):
 
     def on_callsign_lookup_finished(self, grid):
         if grid:
-            self.txt_grid.setText(grid)
+            self._home_qth_grid = grid
+            if not self.chk_start_p2p.isChecked():
+                self.txt_grid.setText(grid)
 
     def set_mobile_grid(self):
         from PyQt6.QtWidgets import QInputDialog
@@ -1790,6 +1846,7 @@ class AboutDialog(QDialog):
 
         features = [
             "• Live POTA spot & respot stream synchronization with evidence parsing",
+            "• Hybrid Live Propagation & Weather Map with RainViewer 5-min Doppler radar & Blitzortung lightning clusters",
             "• Live RBN & PSKReporter intelligence for empirical skip-zone and SNR verification",
             "• Multi-layer ionospheric modeling (E, F1, F2) & multi-hop ray tracing",
             "• Skip-zone cutoff calculations based on operating frequency and distance",
@@ -1797,6 +1854,7 @@ class AboutDialog(QDialog):
             "• Storm cell trajectory tracking, ground motion vectors, & Time of Arrival (TOA) estimates",
             "• Open-Meteo local weather integration with 12-hour hourly forecast & 24-hour UTC times",
             "• Station link budget calculations with transmitter power (Watts) & antenna patterns",
+            "• Preferences & Startup Mode manager (Home QTH vs. P2P Mode with auto park grid updates)",
             "• Auto-comparison with local hunted CSV log, P2P portable mode & worked status tracking",
         ]
 
@@ -1951,21 +2009,35 @@ class DocumentationDialog(QDialog):
         docs_html = f"""
         <h1 style="color: #7ee787; font-size: 18px; margin-top: 0; border-bottom: 2px solid #238636; padding-bottom: 6px;">PART I: APPLICATION OPERATION & SETUP</h1>
 
-        <h2 style="color: #58a6ff; margin-top: 14px;">1. Getting Started: Downloading & Loading Your Hunter Log</h2>
+        <h2 style="color: #58a6ff; margin-top: 14px;">1. Getting Started: Preferences & Hunter Log Setup</h2>
         <p><b>POTA Prop</b> is a desktop application designed for amateur radio operators hunting Parks on the Air. It compares live activator spots from <a href="https://pota.app" style="color: #7ee787;">pota.app</a> against your historical hunted CSV log, estimating contact probability using ionospheric ray tracing, live space weather, and regional atmospheric lightning noise (QRN).</p>
         
-        <h3 style="color: #7ee787;">Step-by-Step Initial Setup:</h3>
+        <h3 style="color: #7ee787;">Step-by-Step Initial Setup & Preferences (Ctrl+P):</h3>
         <ol>
             <li><b>Authenticate with POTA.app:</b> Click the <b>Sign In POTA.app</b> button on the top toolbar. A secure browser window will open, allowing you to log into your pota.app account. Once signed in, POTA Prop will automatically extract your authentication token and close the window.</li>
-            <li><b>Auto-Sync Your Hunter Log:</b> Once authenticated, click <b>Sync POTA Data</b>. The application will instantly connect to the POTA API, download your entire historical hunted log, and integrate it into the application automatically. No more downloading CSV files manually!</li>
-            <li><b>Operator Callsign:</b> Enter your callsign in the <b>My Call</b> field. The app automatically looks up your home Maidenhead grid locator from online databases (or DXCC prefix mapping if you are international).</li>
-            <li><b>Home Grid:</b> Enter your Maidenhead Grid Locator (e.g. <code>EM98dh</code>) to establish your exact QTH reference point for distance, bearing, and propagation calculations.</li>
+            <li><b>Auto-Sync Your Hunter Log:</b> Once authenticated, click <b>Sync Log</b> (or <b>Sync POTA Data</b>). The application will instantly connect to the POTA API, download your entire historical hunted log, and integrate it into the application automatically.</li>
+            <li><b>Preferences Manager (Ctrl+P):</b> Open <i>File &rarr; Preferences</i> (or press <b>Ctrl+P</b>) to configure:
+                <ul>
+                    <li><b>Operator Callsign:</b> Enter your callsign (e.g. <code>W8XYZ</code>). The app automatically queries online databases to identify your Maidenhead grid locator.</li>
+                    <li><b>Grid Location:</b> Displays your active operating grid square. Click <b>Set Mobile/Temp</b> to auto-detect your location via IP Geolocation when away from home.</li>
+                    <li><b>Startup Mode (Home vs. P2P):</b> Choose whether the application starts at your Home QTH or in <b>P2P Mode</b>. Checking <b>Start in P2P Mode</b> enables the <b>P2P Field Park</b> input, which automatically queries the park and updates your Grid Location on startup.</li>
+                    <li><b>Local RBN/PSK Nodes:</b> Click <b>Auto-Find Nearest</b> to automatically identify the nearest active reverse beacon skimmers within 200 miles.</li>
+                </ul>
+            </li>
         </ol>
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">2. Filtering, Searching, Station Setup & Portable Operation</h2>
+        <h2 style="color: #58a6ff;">2. Filtering, Searching, Station Setup & Live Map</h2>
         <ul>
+            <li><b>Live Propagation & Weather Map:</b> Click the <b>Live Propagation & Weather Map</b> button on the main toolbar to open the global interactive propagation heatmap:
+                <ul>
+                    <li><b>Live Doppler Weather Radar:</b> Integrated RainViewer precipitation reflectivity layer automatically fetching updated sweeps every 5 minutes.</li>
+                    <li><b>Show Lightning Clusters:</b> Real-time Blitzortung thunderstorm cluster markers (<code>⚡</code> / <code>⚡➤</code> with directional motion vectors) displaying strike counts, ground speed, heading, and NWS convective alert headlines.</li>
+                    <li><b>Propagation Skip Diagrams:</b> Green lines indicate open skywave/groundwave paths; dashed red lines highlight mathematical skip-zone penetration.</li>
+                    <li><b>Hybrid Architecture:</b> Uses native Qt6 WebEngine on Linux/Windows, and a local hardware-accelerated HTTP server on Chromebooks.</li>
+                </ul>
+            </li>
             <li><b>Multi-Criteria Filters:</b> Filter spots by Status (<i>All</i>, <i>New</i>, <i>Hunted</i>, <i>Worked</i>, <i>P2P</i>), Score Threshold (<i>All</i>, <i>&ge;25</i>, <i>&ge;50</i>, <i>&ge;75</i>, <i>&ge;99</i>), Band, and Mode.</li>
             <li><b>Instant Search:</b> Type any callsign, park reference, park name, state, grid, or comment keyword into the search box for real-time table filtering.</li>
             <li><b>Transmitter Power (Watts):</b> Select your rig's output power (QRP 5W, 100W, 500W, or 1500W Legal Limit). The link budget calculation adjusts transmitter output in dBW and expected receiver SNR accordingly.</li>
@@ -1979,7 +2051,7 @@ class DocumentationDialog(QDialog):
                     <li><b>Random Wire / Compromised:</b> Emulates field wire antennas with unun transformer and counterpoise ground loss factors.</li>
                 </ul>
             </li>
-            <li><b>Park-to-Park (P2P) Mode:</b> Operating portable from a park? Check the <b>Park-to-Park (P2P)</b> checkbox and enter your current activator park reference (e.g. <code>US-1845</code>). The app resolves your park's grid and re-centers all distance, bearing, and propagation calculations from your active park grid.</li>
+            <li><b>Park-to-Park (P2P) Mode:</b> Operating portable from a park? Check the <b>P2P Mode</b> checkbox on the toolbar and enter your field park reference (e.g. <code>US-1845</code>). The app resolves your park's grid and re-centers all distance, bearing, and propagation calculations from your active park grid.</li>
         </ul>
 
         <hr style="border: 1px solid #30363d;" />
@@ -2541,60 +2613,106 @@ class MapPropagationWorker(QRunnable):
                     heatmap_data.append([lat, lon, blended_prob / 100.0])
 
         self.signals.finished.emit(self.band, self.mode, json.dumps(heatmap_data))
-def open_frameless_browser(url: str):
-    import subprocess
-    import shutil
-    import platform
-    import os
-    import tempfile
-    import webbrowser
-    import logging
+class MapBackend(QObject):
+    filterChanged = pyqtSignal(str, str)
+    graylineChanged = pyqtSignal(bool)
+    fullscreenToggle = pyqtSignal()
 
-    system = platform.system()
-    profile_dir = os.path.join(tempfile.gettempdir(), 'pota_map_profile')
-    
-    custom_env = os.environ.copy()
-    if system != "Windows" and system != "Darwin":
-        custom_env["GTK_THEME"] = "Adwaita:dark"
-        # Force software rendering on Linux to fix Crostini WebGL/dma_buf crashes
-        custom_env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    @pyqtSlot(str, str)
+    def onFilterChanged(self, band, mode):
+        self.filterChanged.emit(band, mode)
 
-    
-    try:
-        if system == "Windows":
-            paths = [
-                shutil.which("chrome"),
-                shutil.which("msedge"),
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-            ]
-            for path in paths:
-                if path and os.path.exists(path):
-                    subprocess.Popen([path, f"--app={url}", "--password-store=basic", f"--user-data-dir={profile_dir}", "--force-dark-mode"], env=custom_env)
-                    return
-        elif system == "Darwin":
-            chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-            if os.path.exists(chrome_path):
-                subprocess.Popen([chrome_path, f"--app={url}", "--password-store=basic", f"--user-data-dir={profile_dir}", "--force-dark-mode"], env=custom_env)
-                return
+    @pyqtSlot(bool)
+    def onGraylineChanged(self, show_grayline):
+        self.graylineChanged.emit(show_grayline)
+
+    @pyqtSlot()
+    def toggleFullscreen(self):
+        self.fullscreenToggle.emit()
+
+
+class MapWindow(QMainWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("POTA Prop - Live Map")
+        self.resize(1050, 750)
+        self.parent_app = parent
+
+        self.web_view = QWebEngineView(self)
+        self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        self.web_view.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        self.setCentralWidget(self.web_view)
+
+        self.backend = MapBackend()
+        self.channel = QWebChannel()
+        self.channel.registerObject("backend", self.backend)
+        self.web_view.page().setWebChannel(self.channel)
+
+        self.backend.filterChanged.connect(self.on_filter_changed)
+        self.backend.graylineChanged.connect(self.on_grayline_changed)
+        self.backend.fullscreenToggle.connect(self.toggle_fullscreen)
+        self.web_view.loadFinished.connect(self.on_load_finished)
+
+        # Shortcuts
+        self.shortcut_fs = QShortcut(QKeySequence("F11"), self)
+        self.shortcut_fs.activated.connect(self.toggle_fullscreen)
+        self.shortcut_esc = QShortcut(QKeySequence("Esc"), self)
+        self.shortcut_esc.activated.connect(self.showNormal)
+
+        map_path = get_resource_path("map.html")
+        self.web_view.setUrl(QUrl.fromLocalFile(map_path))
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
         else:
-            for exe in ["google-chrome", "chromium-browser", "chromium", "brave-browser", "microsoft-edge"]:
-                exe_path = shutil.which(exe)
-                if exe_path:
-                    if "garcon" in os.path.realpath(exe_path).lower():
-                        continue
-                    subprocess.Popen([exe, f"--app={url}", "--password-store=basic", f"--user-data-dir={profile_dir}", "--force-dark-mode"], env=custom_env)
-                    return
-    except Exception as e:
-        logging.error(f"Failed to open frameless browser: {e}")
+            self.showFullScreen()
 
-    # Fallback to default browser tabs
-    webbrowser.open(url)
+    def on_load_finished(self, ok):
+        if ok and self.parent_app:
+            home_lat, home_lon = maidenhead_to_latlon(self.parent_app.current_grid)
+            if home_lat is not None and home_lon is not None:
+                self.web_view.page().runJavaScript(f"initMap({home_lat}, {home_lon});")
+            self.parent_app.push_all_data_to_map()
+
+    def on_filter_changed(self, band, mode):
+        if self.parent_app:
+            self.parent_app.on_web_filter_changed(band, mode)
+
+    def on_grayline_changed(self, show_grayline):
+        if self.parent_app:
+            self.parent_app.on_web_grayline_changed(show_grayline)
+
+    def update_spots(self, spots_data):
+        escaped_json = json.dumps(spots_data)
+        self.web_view.page().runJavaScript(f"if (typeof window.updateSpots === 'function') window.updateSpots({escaped_json});")
+
+    def update_heatmap(self, heatmap_json_str):
+        self.web_view.page().runJavaScript(f"if (typeof window.updateHeatmap === 'function') window.updateHeatmap({heatmap_json_str});")
+
+    def update_grayline(self, lines_data):
+        escaped_json = json.dumps(lines_data)
+        self.web_view.page().runJavaScript(f"if (typeof window.updateGrayline === 'function') window.updateGrayline({escaped_json});")
+
+    def update_lightning(self, cells_data):
+        escaped_json = json.dumps(cells_data)
+        self.web_view.page().runJavaScript(f"if (typeof window.updateLightning === 'function') window.updateLightning({escaped_json});")
+
+    def update_band_counts(self, counts_data):
+        escaped_json = json.dumps(counts_data)
+        self.web_view.page().runJavaScript(f"if (typeof window.updateBandCounts === 'function') window.updateBandCounts({escaped_json});")
+
+    def set_last_update(self, time_str):
+        self.web_view.page().runJavaScript(f"if (typeof window.setLastUpdate === 'function') window.setLastUpdate('{time_str}');")
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
 
 
 
 class POTAPropApp(QMainWindow):
+    browser_filter_signal = pyqtSignal(str, str, bool)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("POTA Prop")
@@ -2615,9 +2733,17 @@ class POTAPropApp(QMainWindow):
         self.authenticator = POTAAuthenticator()
         self.authenticator.auth_state_changed.connect(self.on_auth_state_changed)
         
-        self.map_server = MapServerManager(os.path.dirname(get_resource_path("map.html")))
-        self.map_server.set_filter_callback(self.on_web_filter_changed)
-        self.map_server.start()
+        self.map_window = None
+        self.browser_filter_signal.connect(self.handle_browser_filter_changed)
+        self.is_chromebook = is_chromebook_crostini()
+        if self.is_chromebook:
+            resources_dir = get_resource_path(".")
+            self.map_server = MapServerManager(resources_dir)
+            self.map_server.set_filter_callback(lambda b, m, g: self.browser_filter_signal.emit(b, m, g))
+            self.map_server.start()
+        else:
+            self.map_server = None
+
         self.map_timer = QTimer(self)
         self.map_timer.setInterval(600_000) # 10 minutes
         self.map_timer.timeout.connect(self.on_map_timer_tick)
@@ -2812,8 +2938,17 @@ class POTAPropApp(QMainWindow):
         footer_bar = self.create_footer_bar()
         main_layout.addWidget(footer_bar)
 
-    def on_web_filter_changed(self, band, mode, show_grayline):
+    def handle_browser_filter_changed(self, band, mode, show_grayline):
+        self.on_web_grayline_changed(show_grayline)
+        self.on_web_filter_changed(band, mode)
+
+    def on_web_filter_changed(self, band, mode):
+        if self.map_server:
+            self.map_server.update_data("band", band)
+            self.map_server.update_data("mode", mode)
         self.recalculate_map_heatmap(band, mode)
+
+    def on_web_grayline_changed(self, show_grayline):
         if show_grayline:
             lines = []
             def add_line(z, style):
@@ -2822,75 +2957,114 @@ class POTAPropApp(QMainWindow):
             add_line(90.0, {"color": "black", "weight": 2, "dashArray": ""})
             add_line(96.0, {"color": "black", "weight": 1, "dashArray": "5, 5"})
             add_line(84.0, {"color": "#777777", "weight": 1, "dashArray": "5, 5"})
-            self.map_server.update_data("grayline", lines)
+            if self.map_window:
+                self.map_window.update_grayline(lines)
+            if self.map_server:
+                self.map_server.update_data("grayline", lines)
         else:
-            self.map_server.update_data("grayline", [])
+            if self.map_window:
+                self.map_window.update_grayline([])
+            if self.map_server:
+                self.map_server.update_data("grayline", [])
 
     def show_map_window(self):
-        h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
-        if h_lat is not None and h_lon is not None:
-            self.map_server.update_data("home_lat", h_lat)
-            self.map_server.update_data("home_lon", h_lon)
+        if self.is_chromebook:
+            self.push_all_data_to_map()
+            if self.map_server:
+                webbrowser.open(self.map_server.get_url())
+            if not self.map_timer.isActive():
+                self.map_timer.start()
+            return
+
+        if not self.map_window:
+            self.map_window = MapWindow(self)
         
-        self.on_map_timer_tick()
+        self.map_window.show()
+        self.map_window.raise_()
+        self.map_window.activateWindow()
         
-        # Calculate initial heatmap state before opening the browser
-        self.recalculate_map_heatmap("20m", "SSB")
+        self.push_all_data_to_map()
         
         if not self.map_timer.isActive():
             self.map_timer.start()
+
+    def push_all_data_to_map(self):
+        if not self.map_window and not self.map_server:
+            return
             
-        open_frameless_browser(self.map_server.get_url())
+        home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
+
+        # Push spots
+        map_spots = []
+        for c in self.compared_spots:
+            if c.propagation and c.spot.latitude is not None and c.spot.longitude is not None:
+                if getattr(c.propagation, 'ray_mode', '') == 'QRT' or (c.propagation.spot_evidence and c.propagation.spot_evidence.is_qrt):
+                    continue
+                has_plus = c.has_local_evidence
+                map_spots.append({
+                    "lat": c.spot.latitude,
+                    "lon": c.spot.longitude,
+                    "score": c.propagation.probability_pct,
+                    "has_plus": has_plus,
+                    "call": c.spot.activator,
+                    "park": f"{c.spot.reference} ({c.spot.park_name})" if c.spot.park_name else c.spot.reference,
+                    "band": c.spot.band,
+                    "mode": getattr(c.spot, "mode", "SSB"),
+                    "muf": round(c.propagation.muf_est_mhz, 1) if getattr(c.propagation, 'muf_est_mhz', None) else None
+                })
+        if self.map_window:
+            self.map_window.update_spots(map_spots)
+        if self.map_server:
+            if home_lat is not None and home_lon is not None:
+                self.map_server.update_data("home_lat", home_lat)
+                self.map_server.update_data("home_lon", home_lon)
+            self.map_server.update_data("spots", map_spots)
+        
+        # Band counts
+        band_parks = {}
+        for spot in map_spots:
+            band = spot["band"]
+            park = spot["park"]
+            if band not in band_parks:
+                band_parks[band] = set()
+            band_parks[band].add(park)
+        band_counts = {band: len(parks) for band, parks in band_parks.items()}
+        band_counts["All"] = len(set(spot["park"] for spot in map_spots))
+        if self.map_window:
+            self.map_window.update_band_counts(band_counts)
+        if self.map_server:
+            self.map_server.update_data("band_counts", band_counts)
+        
+        # Grayline
+        lines = []
+        def add_line(z, style):
+            p = calculate_grayline_polylines(z)
+            lines.append({"coords": p, "style": style})
+        add_line(90.0, {"color": "black", "weight": 2, "dashArray": ""})
+        add_line(96.0, {"color": "black", "weight": 1, "dashArray": "5, 5"})
+        add_line(84.0, {"color": "#777777", "weight": 1, "dashArray": "5, 5"})
+        if self.map_window:
+            self.map_window.update_grayline(lines)
+        if self.map_server:
+            self.map_server.update_data("grayline", lines)
+        
+        # Lightning
+        if getattr(self, 'lightning_summary', None):
+            self.update_map_lightning(self.lightning_summary)
+            
+        # Initial heatmap
+        self.recalculate_map_heatmap("20m", "SSB")
 
     def on_map_timer_tick(self):
-        if getattr(self, 'map_server', None):
-            # Sync the latest spots to the map
-            map_spots = []
-            for c in self.compared_spots:
-                if c.propagation and c.spot.latitude is not None and c.spot.longitude is not None:
-                    if getattr(c.propagation, 'ray_mode', '') == 'QRT' or (c.propagation.spot_evidence and c.propagation.spot_evidence.is_qrt):
-                        continue
-                    has_plus = c.has_local_evidence
-                    map_spots.append({
-                        "lat": c.spot.latitude,
-                        "lon": c.spot.longitude,
-                        "score": c.propagation.probability_pct,
-                        "has_plus": has_plus,
-                        "call": c.spot.activator,
-                        "park": f"{c.spot.reference} ({c.spot.park_name})" if c.spot.park_name else c.spot.reference,
-                        "band": c.spot.band,
-                        "mode": getattr(c.spot, "mode", "SSB"),
-                        "muf": round(c.propagation.muf_est_mhz, 1) if getattr(c.propagation, 'muf_est_mhz', None) else None
-                    })
-            self.map_server.update_data("spots", map_spots)
-            
-            # Sync map metadata
-            band_parks = {}
-            for spot in map_spots:
-                band = spot["band"]
-                park = spot["park"]
-                if band not in band_parks:
-                    band_parks[band] = set()
-                band_parks[band].add(park)
-                
-            band_counts = {band: len(parks) for band, parks in band_parks.items()}
-            band_counts["All"] = len(set(spot["park"] for spot in map_spots))
-            # Just push this to spots data or maybe a new key.
-            # wait, the JS expects updateBandCounts but map_server doesn't store band_counts directly.
-            # Let's add it to map_data as 'band_counts' in a future update if needed, but not strictly necessary since
-            # the js doesn't poll band_counts, it was pushed.
-            
-            from datetime import datetime, timezone
-            last_update = datetime.now(timezone.utc).strftime("%H:%M")
-            self.map_server.update_data("last_update", last_update)
-            
-            if getattr(self, 'lightning_summary', None):
-                self.update_map_lightning(self.lightning_summary)
+        if (self.map_window and self.map_window.isVisible()) or self.map_server:
+            self.push_all_data_to_map()
 
     def recalculate_map_heatmap(self, band: str, mode: str = "SSB"):
-        if band == "All" or not getattr(self, 'map_server', None):
-            if getattr(self, 'map_server', None):
-                self.map_server.update_data("heatmap", [])
+        if band == "All" or (not self.map_window and not self.map_server):
+            if self.map_window:
+                self.map_window.update_heatmap("[]")
+            if self.map_server:
+                self.map_server.update_data("heatmap", "[]")
             return
             
         home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
@@ -2933,33 +3107,41 @@ class POTAPropApp(QMainWindow):
         )
         worker.signals.finished.connect(self.on_map_heatmap_calculated)
         
-        if getattr(self, 'map_server', None):
+        if self.map_window:
+            self.map_window.set_last_update("Updating... Standby...")
+        if self.map_server:
             self.map_server.update_data("last_update", "Updating... Standby...")
             
         self._run_worker(worker)
 
     @pyqtSlot(str, str, str)
     def on_map_heatmap_calculated(self, band, mode, heatmap_json):
-        if getattr(self, 'map_server', None):
-            self.map_server.update_data("heatmap", json.loads(heatmap_json))
-            self.map_server.update_data("band", band)
-            self.map_server.update_data("mode", mode)
-            from datetime import datetime, timezone
-            last_update = datetime.now(timezone.utc).strftime("%H:%M")
+        from datetime import datetime, timezone
+        last_update = datetime.now(timezone.utc).strftime("%H:%M")
+        if self.map_window:
+            self.map_window.update_heatmap(heatmap_json)
+            self.map_window.set_last_update(last_update)
+        if self.map_server:
+            self.map_server.update_data("heatmap", heatmap_json)
             self.map_server.update_data("last_update", last_update)
             
     def update_map_lightning(self, summary):
         cells = []
         if summary and hasattr(summary, 'storm_cells') and summary.storm_cells:
             for c in summary.storm_cells:
-                if c.latitude and c.longitude:
+                if c.latitude is not None and c.longitude is not None:
                     cells.append({
                         "lat": float(c.latitude),
                         "lon": float(c.longitude),
-                        "heading": float(c.movement_heading_deg or 0.0),
-                        "speed": float(c.movement_speed_mph or 0.0)
+                        "heading": float(c.movement_heading_deg) if c.movement_heading_deg is not None else None,
+                        "speed": float(c.movement_speed_mph) if c.movement_speed_mph is not None else None,
+                        "strikes": int(getattr(c, 'total_strikes_in_cluster', 0) or getattr(c, 'estimated_strikes_15m', 0) or getattr(c, 'actual_strikes_in_polygon', 0) or 0),
+                        "event_type": str(getattr(c, 'event_type', 'Thunderstorm')),
+                        "headline": str(getattr(c, 'headline', ''))
                     })
-        if getattr(self, 'map_server', None):
+        if self.map_window:
+            self.map_window.update_lightning(cells)
+        if self.map_server:
             self.map_server.update_data("lightning", cells)
 
     def show_settings_dialog(self):
@@ -2968,20 +3150,35 @@ class POTAPropApp(QMainWindow):
             new_call = dlg.txt_call.text().strip().upper()
             new_grid = dlg.txt_grid.text().strip().upper()
             new_rbn = dlg.txt_rbn.text().strip().upper()
+            new_p2p_mode = dlg.chk_start_p2p.isChecked()
+            new_p2p_park = dlg.txt_p2p_park.text().strip().upper()
+            
+            settings = QSettings("POTA", "HunterComparator")
+            settings.setValue("p2p_mode", new_p2p_mode)
+            settings.setValue("p2p_my_park", new_p2p_park)
             
             if new_call != self.my_call:
                 self.my_call = new_call
                 self.txt_my_call.setText(new_call)
                 self.on_my_call_changed()
                 
-            if new_grid != self.home_grid:
+            self.p2p_mode = new_p2p_mode
+            self.p2p_my_park = new_p2p_park
+            self.chk_p2p.setChecked(new_p2p_mode)
+            self.txt_p2p_park.setText(new_p2p_park)
+            
+            if new_p2p_mode:
+                self.current_grid = new_grid
+                self.txt_grid.setText(new_grid)
+                self.on_p2p_park_changed()
+            else:
                 self.home_grid = new_grid
+                self.current_grid = new_grid
                 self.txt_grid.setText(new_grid)
                 self.on_grid_changed()
                 
             if new_rbn != getattr(self, 'rbn_nodes_str', ''):
                 self.rbn_nodes_str = new_rbn
-                settings = QSettings("POTA", "HunterComparator")
                 settings.setValue("rbn_nodes_str", new_rbn)
                 # Parse list and restart timer
                 self.rbn_nodes_list = [c.strip().upper() for c in new_rbn.split(',') if c.strip()]
@@ -3086,12 +3283,7 @@ class POTAPropApp(QMainWindow):
         dlg.exec()
 
     def show_radar_dialog(self):
-        import webbrowser
-        h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
-        if h_lat is None or h_lon is None:
-            h_lat, h_lon = 38.3125, -81.7083
-        url = f"https://www.windy.com/?radar,{h_lat:.4f},{h_lon:.4f},7"
-        open_frameless_browser(url)
+        self.show_map_window()
 
     def show_band_noise_dialog(self):
         h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
@@ -3274,8 +3466,7 @@ class POTAPropApp(QMainWindow):
         self.card_lightning = StatCard("Lightning", "1", "#2ea043")
         self.card_noise = StatCard("Band Noise", "40m: S0 | 20m: S0", "#58a6ff", is_clickable=True)
         self.card_noise.clicked.connect(self.show_band_noise_dialog)
-        self.card_weather = StatCard("Weather (Click for Radar)", "--°F", "#58a6ff", is_clickable=True)
-        self.card_weather.clicked.connect(self.show_radar_dialog)
+        self.card_weather = StatCard("Weather", "--°F", "#58a6ff")
 
         layout.addWidget(self.card_new, stretch=1)
         layout.addWidget(self.card_hunted, stretch=1)
@@ -3813,6 +4004,8 @@ class POTAPropApp(QMainWindow):
                 h_lat, h_lon = maidenhead_to_latlon(clean_grid)
                 if h_lat is not None and h_lon is not None:
                     self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
+                    if self.lightning_summary:
+                        self.update_map_lightning(self.lightning_summary)
                 self.recompute_comparisons()
                 self.refresh_weather_display(force_refresh=True)
             name_str = f" ({loc.name})" if loc.name else ""
@@ -3840,6 +4033,8 @@ class POTAPropApp(QMainWindow):
                 h_lat, h_lon = maidenhead_to_latlon(clean_grid)
                 if h_lat is not None and h_lon is not None:
                     self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
+                    if self.lightning_summary:
+                        self.update_map_lightning(self.lightning_summary)
                 self.recompute_comparisons()
                 self.refresh_weather_display(force_refresh=True)
             name_str = f" ({loc.name})" if loc.name else ""
@@ -3860,6 +4055,8 @@ class POTAPropApp(QMainWindow):
         h_lat, h_lon = maidenhead_to_latlon(grid)
         if h_lat is not None and h_lon is not None:
             self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
+            if self.lightning_summary:
+                self.update_map_lightning(self.lightning_summary)
         self.recompute_comparisons()
         self.refresh_weather_display(force_refresh=True)
         self.status_bar.showMessage(
@@ -3931,6 +4128,7 @@ class POTAPropApp(QMainWindow):
             self.solar_weather = solar_weather
         if lightning_summary is not None:
             self.lightning_summary = lightning_summary
+            self.update_map_lightning(self.lightning_summary)
             
         # Queue up to 5 digital activators for PSKReporter polling (prioritize VHF/6m)
         import random
@@ -4165,6 +4363,7 @@ class POTAPropApp(QMainWindow):
             home_lat, home_lon = 38.3125, -81.7083
 
         self.lightning_summary = fetch_regional_lightning_summary(home_lat, home_lon, force_refresh=True)
+        self.update_map_lightning(self.lightning_summary)
         self._check_nws_warnings()
 
         # Update Lightning Card & Tooltip
@@ -4261,6 +4460,8 @@ class POTAPropApp(QMainWindow):
             h_lat, h_lon = maidenhead_to_latlon(self.home_grid)
             if h_lat is not None and h_lon is not None:
                 self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
+                if self.lightning_summary:
+                    self.update_map_lightning(self.lightning_summary)
             self.status_bar.showMessage(
                 f"P2P Mode disabled -> Grid reverted to home QTH {self.home_grid}"
             )
@@ -4279,6 +4480,8 @@ class POTAPropApp(QMainWindow):
             h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
             if h_lat is not None and h_lon is not None:
                 self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
+                if self.lightning_summary:
+                    self.update_map_lightning(self.lightning_summary)
             self.recompute_comparisons()
             self.refresh_weather_display(force_refresh=True)
             return
@@ -4299,6 +4502,8 @@ class POTAPropApp(QMainWindow):
             h_lat, h_lon = maidenhead_to_latlon(grid)
             if h_lat is not None and h_lon is not None:
                 self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
+                if self.lightning_summary:
+                    self.update_map_lightning(self.lightning_summary)
             park_name = info.get("name", "")
             self.p2p_my_park_name = park_name
             name_str = f" ({park_name})" if park_name else ""
@@ -4334,6 +4539,8 @@ class POTAPropApp(QMainWindow):
                 h_lat, h_lon = maidenhead_to_latlon(grid)
                 if h_lat is not None and h_lon is not None:
                     self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
+                    if self.lightning_summary:
+                        self.update_map_lightning(self.lightning_summary)
                 park_name = info.get("name", "")
                 self.p2p_my_park_name = park_name
                 name_str = f" ({park_name})" if park_name else ""
@@ -4439,8 +4646,7 @@ class POTAPropApp(QMainWindow):
         self.card_lightning.set_accent_color(act.color)
         self.card_lightning.setToolTip(self.lightning_summary.format_tooltip_html())
         
-        if getattr(self, 'map_server', None):
-            self.update_map_lightning(self.lightning_summary)
+        self.update_map_lightning(self.lightning_summary)
 
         # Update Band Noise Floor card
         h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
@@ -4486,7 +4692,7 @@ class POTAPropApp(QMainWindow):
         self.combo_mode.blockSignals(False)
 
         # Update map if active
-        if getattr(self, 'map_server', None):
+        if self.map_window and self.map_window.isVisible():
             self.on_map_timer_tick()
 
         self.apply_filters()
@@ -5396,42 +5602,17 @@ class POTAPropApp(QMainWindow):
         settings.setValue("filter_band", self.combo_band.currentText())
         settings.setValue("filter_mode", self.combo_mode.currentText())
         settings.setValue("refresh_interval_idx", self.combo_refresh.currentIndex())
-        settings.setValue("manually_worked_parks", dict(self.manually_worked_parks))
+        if getattr(self, 'map_server', None):
+            self.map_server.stop()
+        if getattr(self, 'map_window', None):
+            self.map_window.close()
         super().closeEvent(event)
 
 
-def is_chromebook_crostini():
-    import os
-    import socket
-    if os.path.exists('/proc/version'):
-        try:
-            with open('/proc/version', 'r') as f:
-                content = f.read().lower()
-                if 'cros-kernel' in content or 'chromium.org' in content:
-                    return True
-        except Exception:
-            pass
-    try:
-        if socket.gethostname() == 'penguin':
-            return True
-    except Exception:
-        pass
-    return False
-
-
 def main():
-    import os
-    # Configure Chromium/WebEngine flags based on platform context
-    if "QTWEBENGINE_CHROMIUM_FLAGS" not in os.environ:
-        if is_chromebook_crostini():
-            # Chromebook Crostini GPU drivers (virgl) fail with dma_buf/compositor. 
-            # We force Mesa to use software rendering to prevent dma_buf freezes, 
-            # but keep WebGL/GPU flags enabled so Chromium can still render WebGL.
-            os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
-            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--ignore-gpu-blocklist --enable-webgl"
-        else:
-            # Standard machines: bypass GPU blocklist to ensure hardware-accelerated WebGL/Windy Radar work
-            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-webgl"
+    # Configure Chromium/WebEngine flags for standard machines
+    if "QTWEBENGINE_CHROMIUM_FLAGS" not in os.environ and not is_chromebook_crostini():
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-webgl"
 
     app = QApplication(sys.argv)
     app.setApplicationName("POTA Prop")

@@ -25,14 +25,21 @@ It compares your hunted parks export against active spots on [pota.app](https://
     - **Mode Penalty Logic**: Evaluates the Signal-to-Noise Ratio (SNR) of live FT8/FT4 decodes to estimate cross-mode viability. Exceptionally strong digital decodes (e.g. >= 0dB) provide massive empirical boosts (+15 points) for SSB targets, while weak decodes are scaled appropriately for CW or ignored for SSB to maintain realistic expectations.
     - **Grayline Enhancement**: Applies path adjustments when either endpoint or the path midpoint aligns with the solar terminator.
     - VHF/UHF Line-of-Sight & 6m Es Modeling: Bounds 2m/70cm to tropospheric line-of-sight range (~150 km max) and detects summer Sporadic-E skip paths for 6m.
-- **Global Interactive Propagation Map**:
+- **Hybrid Live Propagation & Weather Map**:
   - Visually maps your real-time 100W link budget and QSO probabilities globally across the earth's surface using mathematically modeled 1x2 degree Maidenhead grid squares.
   - Generates smooth color gradients (Red -> Orange -> Yellow -> Green) mapped directly to your physics engine probabilities.
   - Features **Propagation Skip Diagrams**: Displays dashed red lines for paths mathematically closed due to skip-zone penetration, and solid green lines for groundwave paths or paths forced open by live empirical network telemetry.
-  - Live POTA spots generate massive Gaussian interpolation blooms (sigma = 1200km radius) radiating across the map to visualize regional openings. Hover over any map balloon to view the estimated **Maximum Usable Frequency (MUF)** for that specific path!
+  - **Live Doppler Weather Radar**: Integrated RainViewer precipitation reflectivity layer automatically fetching updated sweeps every 5 minutes.
+  - **Show Lightning Clusters**: Live Blitzortung thunderstorm cluster markers (`⚡` / `⚡➤` with directional motion vectors) displaying real-time cluster strike counts, storm ground speed, movement heading, and NWS convective alert headlines.
+  - **Hybrid Architecture**: Uses native Qt6 `QWebEngineView` on standard Linux and Windows desktops, and automatically runs a lightweight, secure local HTTP server (`map_server.py`) on Chromebooks (ChromeOS / Crostini) to render in ChromeOS Chrome with full hardware GPU acceleration.
+  - Dedicated **"Live Propagation & Weather Map"** button on the main toolbar for single-click map launching.
   - Automatically recalculates and forces a UI refresh every 15 minutes as Grayline terminator geometry and Space Weather conditions drift.
-  - Fully interactive Leaflet.js map with opacity sliders and native Full-Screen capability (F11 / Esc) for multi-monitor viewing.
-- **Live Weather Radar Dialog**: Interactive Windy.com weather radar mapping natively embedded with a fullscreen toggle for severe weather tracking.
+  - Fully interactive Leaflet.js map with opacity sliders, filter controls, and native Full-Screen capability (F11 / Esc) for multi-monitor viewing.
+- **Preferences & Startup Modes (`Ctrl+P`)**:
+  - **Startup Mode Selection**: Set your preferred startup mode—**At Home** (using your callsign's home QTH) or **Start in P2P Mode**.
+  - **P2P Field Park & Auto-Grid**: When operating portable, enter your field park reference (e.g. `US-1845`), and POTA Prop automatically looks up and sets your **Grid Location** to that park.
+  - **Grid Location & Mobile/Temp Locator**: Displays your operating grid with a built-in **Set Mobile/Temp** button for automatic IP geolocation.
+  - **Local RBN/PSK Nodes**: Quick auto-detection of nearest skimmer nodes within 200 miles.
 - **Interactive Multi-Filter Controls**:
   - **Status Filter**: View *All*, *New*, *Hunted*, *Worked*, or *P2P*.
   - **QSO Score Filter**: Filter by *All (0+)*, *>= 25 (Possible)*, *>= 50 (Good)*, *>= 75 (High)*, or *>= 99 (Exceptional)*.
@@ -40,7 +47,7 @@ It compares your hunted parks export against active spots on [pota.app](https://
   - **Mode Filter**: Filter by CW, SSB, FT8, FT4, FM, AM, Digital, etc.
   - **Instant Search**: Real-time search across Park ID, Park Name, Activator Callsign, Location/State, Grid, or Spotter Comments.
 - **Summary Metric Cards**: Live counters for Unhunted Spots, Hunted Spots, Total Spots, Unique Active Parks, Total Parks in Log, Live NOAA Space Weather (SFI / K-Index), Regional Lightning Activity (1–10 Threat Scale), and Receiver Band Noise Floor (S-units).
-  - **Interactive Table & Resizable Columns**:
+- **Interactive Table & Resizable Columns**:
   - **13 Detailed Columns**: Status, `Score`, Activator, Frequency, Time, Park ID, Park Name, Location/State, Band, Mode, Distance & Bearing, Grid, Comments.
   - **Local Verification (`+` Symbol)**: Scores featuring a `+` (e.g. `85+`) indicate local spotter verification confirming nearby spotters in your region hear the signal.
   - **Interactive Diagnostics**: Hover over any `Score` badge or table row to see full path diagnostics (Ray Mode, Launch Angle, Path Loss, Predicted SNR, MUF, Lightning QRN Surge, Space Weather, and Empirical Network Data).
@@ -63,11 +70,14 @@ It compares your hunted parks export against active spots on [pota.app](https://
 
 1. **Authenticate and Sync Data from POTA.app**:
    - Click **Sign In POTA.app** in the application. A secure browser window will open, allowing you to sign into your pota.app account.
-   - Once authenticated, click **Sync POTA Data**. POTA Prop will automatically connect to the POTA API, download your entire historical hunted log, and integrate it instantly. No more downloading CSV files manually!
-2. **Configure Your Station**:
-   - Enter your **My Call** and **Home Grid** (e.g. `EM98dh`).
-   - Select your transmitter power (5W, 100W, 500W, 1500W) and antenna preset (Dipole, Vertical, Beam, etc.) to tailor the link budget.
-3. **Marking Worked Parks Off Your List**:
+   - Once authenticated, click **Sync POTA Data** (or **Sync Log**). POTA Prop will automatically connect to the POTA API, download your entire historical hunted log, and integrate it instantly.
+2. **Configure Your Station & Preferences (`Ctrl+P`)**:
+   - Enter your **Operator Callsign** and **Grid Location** (e.g. `EM98dh`).
+   - Select your preferred **Startup Mode** (At Home vs. P2P Mode).
+   - Select your transmitter power (5W, 100W, 500W, 1500W) and antenna preset (Dipole, Vertical, Beam, etc.) on the main window to tailor the link budget.
+3. **Explore the Live Propagation & Weather Map**:
+   - Click the **Live Propagation & Weather Map** button to open the global interactive map, Doppler weather radar, and lightning clusters.
+4. **Marking Worked Parks Off Your List**:
    - Made a contact with an active park? Click the **Status** drop-down menu in the table row and select **Mark [WORKED]** (or right-click the row and select *Toggle Worked Status*).
    - The row immediately turns green, and your counters update. Manually worked parks are saved persistently across sessions!
 
@@ -93,7 +103,7 @@ python3 pota_prop.py
 
 - Python 3.10+
 - `PyQt6`
-- `PyQt6-WebEngine`
+- `PyQt6-WebEngine` (for native desktop map embedding on Linux/Windows)
 - `requests`
 
 Installed automatically in the Python environment. To install in a separate environment:
@@ -105,9 +115,9 @@ pip install -r requirements.txt
 
 ## Running Automated Tests
 
-Run the test suite:
+Run the full automated test suite:
 ```bash
-python3 test_pota_prop.py
+python3 -m unittest test_web.py test_pota_prop.py
 ```
 
 ---

@@ -56,7 +56,9 @@
 
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<!-- Removed Leaflet Heatmap Plugin -->
+<!-- QtWebChannel Transport for Native Desktop Integration -->
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+
 <script>
     var map;
     var heatLayer;
@@ -64,16 +66,21 @@
     var currentBand = "20m";
     var currentMode = "SSB";
     var graylineLines = [];
+    var backend = null;
 
     // All spots data
     var spotsData = [];
     var lightLayer;
     var darkLayer;
     
-    const urlParams = new URLSearchParams(window.location.search);
-    const authToken = urlParams.get('token') || '';
+    // Live Doppler Radar
+    var radarLayer = null;
+    var radarOpacity = 0.65;
+    var radarTimer = null;
 
     function initMap(lat, lon) {
+        if (map) return;
+        
         map = L.map('map', {
             center: [lat, lon],
             zoom: 3,
@@ -81,7 +88,7 @@
             preferCanvas: true
         });
 
-        // OpenStreetMap tiles
+        // OpenStreetMap basemap tiles
         lightLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
             attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
         });
@@ -104,23 +111,29 @@
 
         markersLayer.addTo(map);
 
-        // Map Control for Band selection
+        // Fetch initial live Doppler weather radar tiles
+        fetchRadarTiles();
+        radarTimer = setInterval(fetchRadarTiles, 300000); // 5 min refresh
+
+        // Map Control for Band selection & Overlays
         var legend = L.control({position: 'topright'});
         legend.onAdd = function (map) {
             var div = L.DomUtil.create('div', 'info legend');
-            div.style.backgroundColor = 'rgba(22, 27, 34, 0.8)';
+            div.style.backgroundColor = 'rgba(22, 27, 34, 0.85)';
             div.style.padding = '10px';
-            div.style.borderRadius = '5px';
+            div.style.borderRadius = '6px';
             div.style.color = 'white';
             div.style.fontFamily = 'sans-serif';
             div.style.fontSize = '12px';
+            div.style.boxShadow = '0 2px 8px rgba(0,0,0,0.5)';
             
             div.innerHTML = '<div id="controls">' +
-                            '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">' +
-                            '<div style="font-weight: bold; font-size: 14px;">Propagation Band</div>' +
-                            '<button onclick="if (!document.fullscreenElement) { document.documentElement.requestFullscreen(); } else { document.exitFullscreen(); }" style="background: #30363d; border: 1px solid #8b949e; color: #c9d1d9; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 12px;" title="Toggle Fullscreen">⛶</button>' +
+                            '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">' +
+                            '<div style="font-weight: bold; font-size: 13px; color: #58a6ff;">Propagation Controls</div>' +
+                            '<button onclick="window.toggleFullscreen()" style="background: #30363d; border: 1px solid #8b949e; color: #c9d1d9; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 12px;" title="Toggle Fullscreen">⛶</button>' +
                             '</div>' +
-                            '<select id="band-select" style="margin-top: 5px; margin-bottom: 10px; width: 100%;" onchange="window.updateFilters()">' +
+                            '<b>Band</b>' +
+                            '<select id="band-select" style="margin-top: 3px; margin-bottom: 8px; width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px;" onchange="window.updateFilters()">' +
                             '<option value="All">All Spots (No Heatmap)</option>' +
                             '<option value="160m">160m</option>' +
                             '<option value="80m">80m</option>' +
@@ -134,30 +147,97 @@
                             '<option value="10m">10m</option>' +
                             '<option value="6m">6m</option>' +
                             '</select>' +
-                            '<b>Propagation Mode</b><br>' +
-                            '<select id="mode-select" style="margin-top: 5px; width: 100%;" onchange="window.updateFilters()">' +
+                            '<b>Mode</b><br>' +
+                            '<select id="mode-select" style="margin-top: 3px; margin-bottom: 8px; width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px;" onchange="window.updateFilters()">' +
                             '<option value="SSB">SSB (Voice)</option>' +
                             '<option value="CW">CW (Morse)</option>' +
                             '<option value="FT8">FT8 (Digital)</option>' +
                             '<option value="FT4">FT4 (Digital)</option>' +
                             '</select>' +
-                            '<div style="margin-top: 10px;"><b>Heatmap Opacity</b></div>' +
+                            '<div style="margin-top: 6px;"><b>Heatmap Opacity</b></div>' +
                             '<input type="range" id="opacity-slider" min="0" max="1" step="0.1" value="0.8" style="width: 100%;" oninput="window.changeOpacity(this.value)">' +
-                            '<div style="margin-top: 10px;">' +
-                            '<div style="margin-top: 10px;">' +
+                            '<div style="margin-top: 6px;"><b>Radar Opacity</b></div>' +
+                            '<input type="range" id="radar-opacity-slider" min="0" max="1" step="0.05" value="0.65" style="width: 100%;" oninput="window.changeRadarOpacity(this.value)">' +
+                            '<div style="margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px;">' +
                             '<label><input type="checkbox" id="darkmap-check" checked onchange="window.toggleDarkMode()"> Dark Map Mode</label><br>' +
+                            '<label><input type="checkbox" id="radar-check" checked onchange="window.toggleRadar()"> Live Weather Radar</label><br>' +
                             '<label><input type="checkbox" id="grayline-check" onchange="window.updateFilters()"> Show Grayline</label><br>' +
-                            '<label><input type="checkbox" id="lightning-check" onchange="window.updateLightningVisibility()"> Show Lightning Cells</label>' +
+                            '<label><input type="checkbox" id="lightning-check" onchange="window.updateLightningVisibility()"> Show Lightning Clusters</label>' +
                             '</div>' +
-                            '<div id="hover-score" style="margin-top: 10px; font-weight: bold; color: #58a6ff; text-align: center; height: 16px;">Hover map for score</div>' +
-                            '<div id="last-update" style="margin-top: 10px; font-size: 11px; color: #8b949e; text-align: center;"></div>';
+                            '<div id="hover-score" style="margin-top: 8px; font-weight: bold; color: #58a6ff; text-align: center; height: 16px;">Hover map for score</div>' +
+                            '<div id="last-update" style="margin-top: 6px; font-size: 11px; color: #8b949e; text-align: center;"></div>';
             return div;
         };
         legend.addTo(map);
+
+        // Initialize QWebChannel bridge if available
+        if (typeof QWebChannel !== 'undefined' && typeof qt !== 'undefined' && qt.webChannelTransport) {
+            new QWebChannel(qt.webChannelTransport, function (channel) {
+                backend = channel.objects.backend;
+                console.log("Connected to Python QWebChannel backend.");
+            });
+        }
     }
 
+    // --- Live Doppler Weather Radar (RainViewer Open API) ---
+    function fetchRadarTiles() {
+        fetch('https://api.rainviewer.com/public/weather-maps.json')
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                if (data && data.radar && data.radar.past && data.radar.past.length > 0) {
+                    var latest = data.radar.past[data.radar.past.length - 1];
+                    var tileUrl = data.host + latest.path + '/256/{z}/{x}/{y}/2/1_1.png';
+                    
+                    var newRadar = L.tileLayer(tileUrl, {
+                        opacity: radarOpacity,
+                        zIndex: 2,
+                        tileSize: 256,
+                        attribution: '&copy; <a href="https://www.rainviewer.com/" style="color:#8b949e;" target="_blank">RainViewer</a>'
+                    });
+                    
+                    var shouldShow = (!document.getElementById('radar-check') || document.getElementById('radar-check').checked);
+                    if (shouldShow && map) {
+                        if (radarLayer && map.hasLayer(radarLayer)) {
+                            map.removeLayer(radarLayer);
+                        }
+                        radarLayer = newRadar;
+                        radarLayer.addTo(map);
+                    } else {
+                        if (radarLayer && map && map.hasLayer(radarLayer)) {
+                            map.removeLayer(radarLayer);
+                        }
+                        radarLayer = newRadar;
+                    }
+                }
+            })
+            .catch(function(err) {
+                console.warn("RainViewer radar fetch failed:", err);
+            });
+    }
+
+    window.toggleRadar = function() {
+        var isChecked = document.getElementById('radar-check').checked;
+        if (isChecked) {
+            if (!radarLayer) {
+                fetchRadarTiles();
+            } else if (map && !map.hasLayer(radarLayer)) {
+                radarLayer.addTo(map);
+            }
+        } else {
+            if (radarLayer && map && map.hasLayer(radarLayer)) {
+                map.removeLayer(radarLayer);
+            }
+        }
+    };
+
+    window.changeRadarOpacity = function(val) {
+        radarOpacity = parseFloat(val);
+        if (radarLayer) {
+            radarLayer.setOpacity(radarOpacity);
+        }
+    };
+
     window.changeOpacity = function(val) {
-        // Adjust the opacity of the SVG or Canvas pane that contains our grid rectangles
         var renderers = document.querySelectorAll('.leaflet-overlay-pane svg, .leaflet-overlay-pane canvas');
         renderers.forEach(function(el) {
             el.style.opacity = val;
@@ -175,6 +255,18 @@
         }
     };
 
+    window.toggleFullscreen = function() {
+        if (backend && typeof backend.toggleFullscreen === 'function') {
+            backend.toggleFullscreen();
+        } else {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(function(){});
+            } else {
+                document.exitFullscreen().catch(function(){});
+            }
+        }
+    };
+
     window.setLastUpdate = function(timeStr) {
         var el = document.getElementById('last-update');
         if (el) {
@@ -188,7 +280,7 @@
 
     window.updateBandCounts = function(counts_json) {
         try {
-            var counts = JSON.parse(counts_json);
+            var counts = (typeof counts_json === 'string') ? JSON.parse(counts_json) : counts_json;
             var select = document.getElementById('band-select');
             if (!select) return;
             for (var i = 0; i < select.options.length; i++) {
@@ -209,37 +301,49 @@
     
     window.updateLightningVisibility = function() {
         lightningLayer.clearLayers();
-        if (document.getElementById('lightning-check') && document.getElementById('lightning-check').checked && currentLightningData.length > 0) {
+        var checkEl = document.getElementById('lightning-check');
+        if (checkEl && checkEl.checked && currentLightningData && currentLightningData.length > 0) {
             currentLightningData.forEach(function(cell) {
                 var html = '';
-                if (cell.speed > 0) {
-                    html = '<div style="transform: rotate(' + (cell.heading - 90) + 'deg); color: #ffffff; font-size: 24px; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0px 0px 6px black;">➤</div>';
+                var hasMovement = (cell.speed !== null && cell.speed !== undefined && cell.speed > 0 && cell.heading !== null && cell.heading !== undefined);
+                if (hasMovement) {
+                    html = '<div style="display:flex; align-items:center; justify-content:center; width:28px; height:28px; background:rgba(255, 204, 0, 0.25); border:2px solid #ffd700; border-radius:50%; box-shadow:0 0 8px rgba(255,215,0,0.8); font-size:14px; transform: rotate(' + (cell.heading - 90) + 'deg);">⚡➤</div>';
                 } else {
-                    html = '<div style="color: #ffffff; font-size: 20px; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0px 0px 6px black;">⚡</div>';
+                    html = '<div style="display:flex; align-items:center; justify-content:center; width:26px; height:26px; background:rgba(255, 204, 0, 0.25); border:2px solid #ffd700; border-radius:50%; box-shadow:0 0 8px rgba(255,215,0,0.8); font-size:16px; color:#ffd700; text-shadow:0 0 4px #000;">⚡</div>';
                 }
                 var icon = L.divIcon({
                     className: 'lightning-marker',
                     html: html,
-                    iconSize: [20, 20],
-                    iconAnchor: [10, 10]
+                    iconSize: [28, 28],
+                    iconAnchor: [14, 14]
                 });
                 var marker = L.marker([cell.lat, cell.lon], {icon: icon});
-                marker.bindPopup("<b>Lightning Cluster</b><br>Speed: " + Math.round(cell.speed) + " mph");
+                var popupContent = "<b>⚡ Lightning Cluster</b>";
+                if (cell.event_type) popupContent += "<br>Type: " + cell.event_type;
+                if (cell.strikes && cell.strikes > 0) popupContent += "<br>Strikes: ~" + cell.strikes;
+                if (hasMovement) {
+                    popupContent += "<br>Movement: " + Math.round(cell.speed) + " mph";
+                    if (cell.heading !== null && cell.heading !== undefined) popupContent += " (" + Math.round(cell.heading) + "°)";
+                } else {
+                    popupContent += "<br>Movement: Stationary / Local";
+                }
+                if (cell.headline) popupContent += "<br><small style='color:#8b949e;'>" + cell.headline + "</small>";
+                marker.bindPopup(popupContent);
                 marker.addTo(lightningLayer);
             });
-            if (!map.hasLayer(lightningLayer)) {
+            if (map && !map.hasLayer(lightningLayer)) {
                 lightningLayer.addTo(map);
             }
         } else {
-            if (map.hasLayer(lightningLayer)) {
+            if (map && map.hasLayer(lightningLayer)) {
                 map.removeLayer(lightningLayer);
             }
         }
     };
 
-    window.updateLightning = function(cells_json) {
+    window.updateLightning = function(cells_data) {
         try {
-            currentLightningData = JSON.parse(cells_json);
+            currentLightningData = (typeof cells_data === 'string') ? JSON.parse(cells_data) : cells_data;
             window.updateLightningVisibility();
         } catch(e) {}
     };
@@ -262,36 +366,43 @@
             }
             window.setLastUpdate("Updating... Standby...");
         }
-        fetch(`/api/set_filter?band=${band}&mode=${mode}&grayline=${showGrayline}&token=${encodeURIComponent(authToken)}`).catch(console.error);
-    };
-    
-    window.forceRefresh = function() {
-        var band = document.getElementById('band-select').value;
-        var mode = document.getElementById('mode-select').value;
-        var showGrayline = document.getElementById('grayline-check').checked;
-        
-        currentBand = band;
-        currentMode = mode;
-        renderSpots();
-        
-        if (heatLayer) {
-            map.removeLayer(heatLayer);
-            heatLayer = null;
+        if (backend && typeof backend.onFilterChanged === 'function') {
+            backend.onFilterChanged(band, mode);
+            backend.onGraylineChanged(showGrayline);
+        } else {
+            var params = new URLSearchParams(window.location.search);
+            var token = params.get('token') || '';
+            if (token) {
+                fetch('/api/set_filter?band=' + encodeURIComponent(band) + '&mode=' + encodeURIComponent(mode) + '&grayline=' + showGrayline + '&token=' + encodeURIComponent(token))
+                    .catch(function(err) { console.warn("Failed to set filter via HTTP:", err); });
+            }
         }
-        window.setLastUpdate("Updating... Standby...");
-        fetch(`/api/set_filter?band=${band}&mode=${mode}&grayline=${showGrayline}&token=${encodeURIComponent(authToken)}`).catch(console.error);
     };
-    
-    function updateGrayline(lines_json) {
-        graylineLines.forEach(function(l) { map.removeLayer(l); });
+
+    window.setFilterState = function(band, mode) {
+        var selectBand = document.getElementById('band-select');
+        var selectMode = document.getElementById('mode-select');
+        if (selectBand && band && selectBand.value !== band) {
+            selectBand.value = band;
+            currentBand = band;
+        }
+        if (selectMode && mode && selectMode.value !== mode) {
+            selectMode.value = mode;
+            currentMode = mode;
+        }
+        renderSpots();
+    };
+
+    window.updateGrayline = function(lines_data) {
+        graylineLines.forEach(function(l) { if (map) map.removeLayer(l); });
         graylineLines = [];
         
-        if (lines_json && lines_json.length > 0) {
-            lines_json.forEach(function(lineObj) {
+        var lines = (typeof lines_data === 'string') ? JSON.parse(lines_data) : lines_data;
+        if (lines && lines.length > 0 && map) {
+            lines.forEach(function(lineObj) {
                 if (lineObj.coords && lineObj.coords.length > 0) {
                     var offsets = [0, -360.0, 360.0];
                     offsets.forEach(function(offset) {
-                        // Support both MultiPolylines (array of array of points) and simple polylines
                         var isMulti = Array.isArray(lineObj.coords[0]) && Array.isArray(lineObj.coords[0][0]);
                         var shiftedCoords = [];
                         if (isMulti) {
@@ -307,7 +418,7 @@
                 }
             });
         }
-    }
+    };
 
     function getScoreClass(score) {
         if (score >= 99) return 'score-exceptional';
@@ -335,7 +446,7 @@
                 }
                 
                 if (!modeMatches) {
-                    return; // Skip rendering this spot since it doesn't match the selected mode
+                    return;
                 }
 
                 var cssClass = getScoreClass(spot.score);
@@ -366,7 +477,7 @@
         });
     }
 
-    function updateSpots(spots_json) {
+    window.updateSpots = function(spots_json) {
         try {
             if (typeof spots_json === 'string') {
                 spotsData = JSON.parse(spots_json);
@@ -377,9 +488,9 @@
         } catch (e) {
             console.error("Error parsing spots JSON: " + e);
         }
-    }
+    };
 
-    function updateHeatmap(heatmap_json) {
+    window.updateHeatmap = function(heatmap_json) {
         try {
             var data;
             if (typeof heatmap_json === 'string') {
@@ -388,11 +499,10 @@
                 data = heatmap_json;
             }
             
-            if (heatLayer) {
+            if (heatLayer && map) {
                 map.removeLayer(heatLayer);
             }
             
-            // Draw precise grid rectangles instead of a density heatmap to avoid overlapping addition artifacts
             var gridGroup = L.layerGroup();
             
             function interpolateColor(c1, c2, factor) {
@@ -406,43 +516,45 @@
             
             function getGradientColor(s) {
                 if (s >= 100) return '#2ea043';
-                if (s >= 50) return interpolateColor('#d29922', '#2ea043', (s - 50) / 50.0); // 50 to 100 is Yellow to Green
-                if (s >= 25) return interpolateColor('#f78166', '#d29922', (s - 25) / 25.0); // 25 to 50 is Orange to Yellow
-                return interpolateColor('#da3633', '#f78166', s / 25.0);                      // 0 to 25 is Red to Orange
+                if (s >= 50) return interpolateColor('#d29922', '#2ea043', (s - 50) / 50.0);
+                if (s >= 25) return interpolateColor('#f78166', '#d29922', (s - 25) / 25.0);
+                return interpolateColor('#da3633', '#f78166', s / 25.0);
             }
             
-            data.forEach(function(pt) {
-                var lat = pt[0];
-                var lon = pt[1];
-                var score = Math.min(100.0, Math.max(0.0, pt[2] * 100.0));
-                
-                var color = getGradientColor(score);
-                
-                // The python backend sends the South-West corner of the Maidenhead square (1 deg lat, 2 deg lon)
-                var offsets = [0, -360.0, 360.0];
-                offsets.forEach(function(offset) {
-                    var bounds = [[lat, lon + offset], [lat + 1.0, lon + offset + 2.0]];
-                    var rect = L.rectangle(bounds, {
-                        color: color,
-                        weight: 0,
-                        fillColor: color,
-                        fillOpacity: 0.8
+            if (data && data.length > 0) {
+                data.forEach(function(pt) {
+                    var lat = pt[0];
+                    var lon = pt[1];
+                    var score = Math.min(100.0, Math.max(0.0, pt[2] * 100.0));
+                    
+                    var color = getGradientColor(score);
+                    
+                    var offsets = [0, -360.0, 360.0];
+                    offsets.forEach(function(offset) {
+                        var bounds = [[lat, lon + offset], [lat + 1.0, lon + offset + 2.0]];
+                        var rect = L.rectangle(bounds, {
+                            color: color,
+                            weight: 0,
+                            fillColor: color,
+                            fillOpacity: 0.8
+                        });
+                        rect.on('mouseover', function(e) {
+                            var el = document.getElementById('hover-score');
+                            if (el) el.innerHTML = "Propagation Score: " + Math.round(score) + "%";
+                        });
+                        rect.on('mouseout', function(e) {
+                            var el = document.getElementById('hover-score');
+                            if (el) el.innerHTML = "Hover map for score";
+                        });
+                        rect.addTo(gridGroup);
                     });
-                    rect.on('mouseover', function(e) {
-                        var el = document.getElementById('hover-score');
-                        if (el) el.innerHTML = "Propagation Score: " + Math.round(score) + "%";
-                    });
-                    rect.on('mouseout', function(e) {
-                        var el = document.getElementById('hover-score');
-                        if (el) el.innerHTML = "Hover map for score";
-                    });
-                    rect.addTo(gridGroup);
                 });
-            });
+            }
             
-            heatLayer = gridGroup.addTo(map);
+            if (map) {
+                heatLayer = gridGroup.addTo(map);
+            }
 
-            // Set initial opacity from slider
             var slider = document.getElementById('opacity-slider');
             if (slider) {
                 window.changeOpacity(slider.value);
@@ -450,47 +562,38 @@
         } catch (e) {
             console.error("Error parsing heatmap JSON: " + e);
         }
-    }
-
-    // Polling logic to fetch data from Python backend securely
-    async function fetchMapData() {
-        try {
-            let res = await fetch(`/api/map_data?token=${encodeURIComponent(authToken)}`);
-            if (!res.ok) return;
-            let data = await res.json();
-            
-            if (!map) {
-                initMap(data.home_lat, data.home_lon);
-            }
-            
-            // Sync UI state with backend if changed elsewhere
-            var selectBand = document.getElementById('band-select');
-            var selectMode = document.getElementById('mode-select');
-            if (selectBand && data.band && selectBand.value !== data.band) {
-                selectBand.value = data.band;
-                currentBand = data.band;
-            }
-            if (selectMode && data.mode && selectMode.value !== data.mode) {
-                selectMode.value = data.mode;
-                currentMode = data.mode;
-            }
-            
-            window.setLastUpdate(data.last_update);
-            updateSpots(data.spots);
-            updateHeatmap(data.heatmap);
-            updateGrayline(data.grayline);
-            if (data.lightning) {
-                window.updateLightning(JSON.stringify(data.lightning));
-            }
-        } catch (e) {
-            console.error(e);
-        }
-        setTimeout(fetchMapData, 5000);
-    }
-    
-    window.onload = function() {
-        fetchMapData();
     };
+
+    // Automatic polling loop for standalone browser mode (e.g. ChromeOS host browser)
+    (function() {
+        var params = new URLSearchParams(window.location.search);
+        var token = params.get('token');
+        if (token) {
+            function fetchMapData() {
+                fetch('/api/map_data?token=' + encodeURIComponent(token))
+                    .then(function(res) {
+                        if (!res.ok) throw new Error("HTTP " + res.status);
+                        return res.json();
+                    })
+                    .then(function(data) {
+                        if (!map && data.home_lat !== undefined && data.home_lon !== undefined) {
+                            initMap(data.home_lat, data.home_lon);
+                        }
+                        if (data.spots !== undefined) window.updateSpots(data.spots);
+                        if (data.heatmap !== undefined) window.updateHeatmap(data.heatmap);
+                        if (data.band_counts !== undefined) window.updateBandCounts(data.band_counts);
+                        if (data.grayline !== undefined) window.updateGrayline(data.grayline);
+                        if (data.lightning !== undefined) window.updateLightning(data.lightning);
+                        if (data.last_update !== undefined) window.setLastUpdate(data.last_update);
+                    })
+                    .catch(function(err) {
+                        console.warn("Map data polling error:", err);
+                    });
+            }
+            fetchMapData();
+            setInterval(fetchMapData, 2500);
+        }
+    })();
 </script>
 
 </body>
