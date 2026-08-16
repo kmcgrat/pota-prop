@@ -17,7 +17,7 @@ import math
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 
-APP_VERSION = "26.8.14-rc2"
+APP_VERSION = "26.8.14-rc3"
 
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
