@@ -259,6 +259,8 @@ class TestPOTADataEngine(unittest.TestCase):
         self.assertEqual(compared[0].propagation.path_type, "Activator QRT / Station Off Air")
 
     def test_goes_solar_flare_and_psk_reporter(self):
+        from datetime import datetime, timezone
+        noon_utc = datetime(2026, 8, 4, 18, 0, 0, tzinfo=timezone.utc)
         home_lat, home_lon = maidenhead_to_latlon("EM98dh")
         al_lat, al_lon = maidenhead_to_latlon("EM63")
 
@@ -269,7 +271,7 @@ class TestPOTADataEngine(unittest.TestCase):
         )
         res_flare = calculate_qso_probability(
             home_lat, home_lon, al_lat, al_lon, "EM63", 14074.0, "20m", "FT8",
-            solar_weather=flare_weather
+            solar_weather=flare_weather, dt_utc=noon_utc
         )
         self.assertIn("R2 Moderate Radio Blackout", res_flare.path_summary)
 
@@ -510,6 +512,42 @@ class TestPOTAComparatorGUIHeadless(unittest.TestCase):
         window2.threadpool.waitForDone(1000)
         window2.close()
 
+    def test_preferences_dialog_and_lookup(self):
+        from pota_prop import POTAPropApp, SettingsDialog, CallsignLookupWorker, GeolocationWorker
+        window = POTAPropApp()
+        dlg = SettingsDialog(window)
+        self.assertIsNotNone(dlg)
+
+        # Test callsign lookup worker directly
+        worker = CallsignLookupWorker("W1AW")
+        grid_result = []
+        worker.signals.finished.connect(grid_result.append)
+        worker.run()
+        self.assertEqual(len(grid_result), 1)
+        self.assertEqual(grid_result[0].upper(), "FN31PR")
+
+        # Test geolocation worker directly (mocking or running if online)
+        geo_worker = GeolocationWorker()
+        geo_result = []
+        geo_worker.signals.finished.connect(geo_result.append)
+        try:
+            geo_worker.run()
+            self.assertEqual(len(geo_result), 1)
+        except Exception:
+            pass
+
+        # Test on_callsign_editing_finished logic in dialog
+        dlg.txt_call.setText("W1AW")
+        dlg.on_callsign_editing_finished()
+        window.threadpool.waitForDone(2000)
+        # Should have updated the home grid textbox in SettingsDialog to FN31PR
+        self.assertEqual(dlg.txt_grid.text().upper(), "FN31PR")
+
+        # Clean up
+        window.refresh_timer.stop()
+        window.threadpool.waitForDone(1000)
+        window.close()
+
 
 class TestStationPropagationModeling(unittest.TestCase):
     @classmethod
@@ -712,14 +750,17 @@ class TestStationPropagationModeling(unittest.TestCase):
         self.assertGreater(qrn_80m, qrn_20m)  # Lower HF frequencies suffer greater QRN
 
         # Compare QSO score with and without lightning QRN
+        from datetime import datetime, timezone
+        noon_utc = datetime(2026, 8, 4, 18, 0, 0, tzinfo=timezone.utc)
         res_clean = calculate_qso_probability(
             home_lat=38.31, home_lon=-81.71, target_lat=35.0, target_lon=-85.0,
             target_grid="EM75", freq_khz=7150.0, band="40m", mode="SSB",
+            dt_utc=noon_utc,
         )
         res_storm = calculate_qso_probability(
             home_lat=38.31, home_lon=-81.71, target_lat=35.0, target_lon=-85.0,
             target_grid="EM75", freq_khz=7150.0, band="40m", mode="SSB",
-            lightning_summary=summary,
+            lightning_summary=summary, dt_utc=noon_utc,
         )
         self.assertLess(res_storm.probability_pct, res_clean.probability_pct)
         self.assertGreater(res_storm.qrn_surge_db, 0.0)

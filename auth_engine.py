@@ -63,7 +63,18 @@ class AuthWebBrowserDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        self.profile = QWebEngineProfile.defaultProfile()
+        from PyQt6.QtCore import QStandardPaths
+        # Ensure a persistent profile is used so cookies and session data are stored on disk
+        app_data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+        storage_path = os.path.join(app_data, "pota_auth_profile")
+        os.makedirs(storage_path, exist_ok=True)
+
+        self.profile = QWebEngineProfile("pota_auth_profile", self)
+        self.profile.setPersistentStoragePath(storage_path)
+        self.profile.setCachePath(os.path.join(storage_path, "Cache"))
+        self.profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        self.profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
+
         self.page = InterceptPage(self.profile, self)
         self.page.code_received.connect(self._on_code_received_from_page)
         
@@ -71,6 +82,20 @@ class AuthWebBrowserDialog(QDialog):
         self.webview.setPage(self.page)
         
         layout.addWidget(self.webview)
+        
+        # Privacy & cookie notice at the bottom
+        from PyQt6.QtWidgets import QLabel
+        lbl_notice = QLabel("Note: This secure sign-in window saves local authentication cookies to keep you logged in on this device. No personal data is tracked or shared.", self)
+        lbl_notice.setWordWrap(True)
+        lbl_notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_notice.setStyleSheet("""
+            color: #8b949e; 
+            font-size: 11px; 
+            background-color: #0d1117; 
+            padding: 8px 12px;
+            border-top: 1px solid #30363d;
+        """)
+        layout.addWidget(lbl_notice)
         
         self.webview.load(QUrl(auth_url))
         

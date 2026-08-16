@@ -57,9 +57,6 @@
 <!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <!-- Removed Leaflet Heatmap Plugin -->
-<!-- QWebChannel to communicate with PyQt6 -->
-<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
-
 <script>
     var map;
     var heatLayer;
@@ -70,9 +67,11 @@
 
     // All spots data
     var spotsData = [];
-    var backend = null;
     var lightLayer;
     var darkLayer;
+    
+    const urlParams = new URLSearchParams(window.location.search);
+    const authToken = urlParams.get('token') || '';
 
     function initMap(lat, lon) {
         map = L.map('map', {
@@ -91,8 +90,8 @@
             attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
         });
 
-        // Add light layer by default
-        lightLayer.addTo(map);
+        // Add dark layer by default
+        darkLayer.addTo(map);
         
         // Add home marker
         L.marker([lat, lon], {
@@ -119,7 +118,7 @@
             div.innerHTML = '<div id="controls">' +
                             '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">' +
                             '<div style="font-weight: bold; font-size: 14px;">Propagation Band</div>' +
-                            '<button onclick="if(backend) backend.toggleFullscreen()" style="background: #30363d; border: 1px solid #8b949e; color: #c9d1d9; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 12px;" title="Toggle Fullscreen (F11)">⛶</button>' +
+                            '<button onclick="if (!document.fullscreenElement) { document.documentElement.requestFullscreen(); } else { document.exitFullscreen(); }" style="background: #30363d; border: 1px solid #8b949e; color: #c9d1d9; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 12px;" title="Toggle Fullscreen">⛶</button>' +
                             '</div>' +
                             '<select id="band-select" style="margin-top: 5px; margin-bottom: 10px; width: 100%;" onchange="window.updateFilters()">' +
                             '<option value="All">All Spots (No Heatmap)</option>' +
@@ -146,7 +145,7 @@
                             '<input type="range" id="opacity-slider" min="0" max="1" step="0.1" value="0.8" style="width: 100%;" oninput="window.changeOpacity(this.value)">' +
                             '<div style="margin-top: 10px;">' +
                             '<div style="margin-top: 10px;">' +
-                            '<label><input type="checkbox" id="darkmap-check" onchange="window.toggleDarkMode()"> Dark Map Mode</label><br>' +
+                            '<label><input type="checkbox" id="darkmap-check" checked onchange="window.toggleDarkMode()"> Dark Map Mode</label><br>' +
                             '<label><input type="checkbox" id="grayline-check" onchange="window.updateFilters()"> Show Grayline</label><br>' +
                             '<label><input type="checkbox" id="lightning-check" onchange="window.updateLightningVisibility()"> Show Lightning Cells</label>' +
                             '</div>' +
@@ -155,14 +154,6 @@
             return div;
         };
         legend.addTo(map);
-
-        // Connect to PyQt WebChannel
-        if (typeof QWebChannel !== "undefined") {
-            new QWebChannel(qt.webChannelTransport, function (channel) {
-                backend = channel.objects.backend;
-                console.log("Connected to Python backend.");
-            });
-        }
     }
 
     window.changeOpacity = function(val) {
@@ -264,17 +255,14 @@
         currentMode = mode;
         renderSpots();
         
-        if (backend) {
-            if (physicsChanged) {
-                if (heatLayer) {
-                    map.removeLayer(heatLayer);
-                    heatLayer = null;
-                }
-                backend.onFilterChanged(band, mode, showGrayline);
-            } else {
-                backend.onGraylineChanged(showGrayline);
+        if (physicsChanged) {
+            if (heatLayer) {
+                map.removeLayer(heatLayer);
+                heatLayer = null;
             }
+            window.setLastUpdate("Updating... Standby...");
         }
+        fetch(`/api/set_filter?band=${band}&mode=${mode}&grayline=${showGrayline}&token=${encodeURIComponent(authToken)}`).catch(console.error);
     };
     
     window.forceRefresh = function() {
@@ -286,13 +274,12 @@
         currentMode = mode;
         renderSpots();
         
-        if (backend) {
-            if (heatLayer) {
-                map.removeLayer(heatLayer);
-                heatLayer = null;
-            }
-            backend.onFilterChanged(band, mode, showGrayline);
+        if (heatLayer) {
+            map.removeLayer(heatLayer);
+            heatLayer = null;
         }
+        window.setLastUpdate("Updating... Standby...");
+        fetch(`/api/set_filter?band=${band}&mode=${mode}&grayline=${showGrayline}&token=${encodeURIComponent(authToken)}`).catch(console.error);
     };
     
     function updateGrayline(lines_json) {
@@ -464,6 +451,46 @@
             console.error("Error parsing heatmap JSON: " + e);
         }
     }
+
+    // Polling logic to fetch data from Python backend securely
+    async function fetchMapData() {
+        try {
+            let res = await fetch(`/api/map_data?token=${encodeURIComponent(authToken)}`);
+            if (!res.ok) return;
+            let data = await res.json();
+            
+            if (!map) {
+                initMap(data.home_lat, data.home_lon);
+            }
+            
+            // Sync UI state with backend if changed elsewhere
+            var selectBand = document.getElementById('band-select');
+            var selectMode = document.getElementById('mode-select');
+            if (selectBand && data.band && selectBand.value !== data.band) {
+                selectBand.value = data.band;
+                currentBand = data.band;
+            }
+            if (selectMode && data.mode && selectMode.value !== data.mode) {
+                selectMode.value = data.mode;
+                currentMode = data.mode;
+            }
+            
+            window.setLastUpdate(data.last_update);
+            updateSpots(data.spots);
+            updateHeatmap(data.heatmap);
+            updateGrayline(data.grayline);
+            if (data.lightning) {
+                window.updateLightning(JSON.stringify(data.lightning));
+            }
+        } catch (e) {
+            console.error(e);
+        }
+        setTimeout(fetchMapData, 5000);
+    }
+    
+    window.onload = function() {
+        fetchMapData();
+    };
 </script>
 
 </body>
