@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 
 from map_server import MapServerManager
 
-APP_VERSION = "26.8.17-rc2"
+APP_VERSION = "26.8.17-rc8"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -5729,7 +5729,7 @@ def main():
     icon_path = get_resource_path("pota_prop.png")
     app_icon = QIcon(icon_path)
     app.setWindowIcon(app_icon)
-    app.setDesktopFileName("pota_prop.desktop")
+    app.setDesktopFileName("pota-prop.desktop")
     
     app.setStyleSheet(DARK_STYLESHEET)
     window = POTAPropApp()
