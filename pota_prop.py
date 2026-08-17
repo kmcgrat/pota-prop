@@ -1936,6 +1936,30 @@ class AboutDialog(QDialog):
 
         layout.addWidget(features_box)
         
+        # Credits & Data Sources
+        credits_box = QGroupBox("Data Sources & Credits")
+        credits_layout = QVBoxLayout(credits_box)
+        credits_layout.setContentsMargins(12, 10, 12, 10)
+        
+        credits_text = (
+            "POTA Prop heavily relies on the incredible work of the following open platforms and data sources. "
+            "Please consider supporting them or contributing to their crowdsourced networks:<br/><br/>"
+            "• <b>Parks on the Air (POTA)</b> - The core spot stream and park database. (<a href='https://parksontheair.com' style='color:#58a6ff;'>parksontheair.com</a>)<br/>"
+            "• <b>Blitzortung.org</b> - Real-time crowd-sourced lightning telemetry. (<a href='https://www.blitzortung.org' style='color:#58a6ff;'>blitzortung.org</a>)<br/>"
+            "• <b>RainViewer</b> - Live Doppler weather radar API. (<a href='https://www.rainviewer.com' style='color:#58a6ff;'>rainviewer.com</a>)<br/>"
+            "• <b>IEM / NOAA Nexrad</b> - Live US weather radar tiles. (<a href='https://mesonet.agron.iastate.edu/' style='color:#58a6ff;'>mesonet.agron.iastate.edu</a>)<br/>"
+            "• <b>PSKReporter & RBN</b> - Live reverse beacon network spotting. (<a href='https://pskreporter.info' style='color:#58a6ff;'>pskreporter.info</a>)<br/>"
+            "• <b>Open-Meteo</b> - Excellent free, open-source weather API. (<a href='https://open-meteo.com' style='color:#58a6ff;'>open-meteo.com</a>)<br/>"
+            "• <b>NOAA SWPC</b> - Space weather data (SFI, K-index, A-index). (<a href='https://www.swpc.noaa.gov' style='color:#58a6ff;'>swpc.noaa.gov</a>)<br/>"
+            "• <b>Carto & OpenStreetMap</b> - Map rendering and basemap tiles."
+        )
+        credits_lbl = QLabel(credits_text)
+        credits_lbl.setOpenExternalLinks(True)
+        credits_lbl.setWordWrap(True)
+        credits_lbl.setStyleSheet("color: #8b949e; font-size: 11px; line-height: 1.4; border: none; background: transparent;")
+        credits_layout.addWidget(credits_lbl)
+        layout.addWidget(credits_box)
+        
         # License Box
         license_box = QGroupBox("License")
         license_layout = QVBoxLayout(license_box)
@@ -2630,19 +2654,23 @@ class MapPropagationWorker(QRunnable):
             a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
             return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-        # Step by 1 degree lat and 2 degrees lon (exact Maidenhead grid square dimensions)
+        # Step by 1 degree lat and 2 degrees lon for true Maidenhead grid resolution
+        # Aligns perfectly to Maidenhead boundaries
         for lat in range(-90, 90, 1):
             for lon in range(-180, 180, 2):
-                # Calculate probability at the exact center of the maidenhead square
+                # Calculate probability at the exact center of the 1x2 block
                 center_lat = lat + 0.5
                 center_lon = lon + 1.0
+                
+                from propagation_engine import latlon_to_maidenhead
+                target_grid = latlon_to_maidenhead(center_lat, center_lon, precision=4)
 
                 res = calculate_qso_probability(
                     home_lat=self.home_lat,
                     home_lon=self.home_lon,
                     target_lat=center_lat,
                     target_lon=center_lon,
-                    target_grid=None,
+                    target_grid=target_grid,
                     freq_khz=freq,
                     band=self.band,
                     mode=self.mode,
@@ -2653,35 +2681,8 @@ class MapPropagationWorker(QRunnable):
                     regional_matrix=self.regional_matrix
                 )
                 if res and res.probability_pct >= 0:
-                    base_prob = res.probability_pct
-                    
-                    # Blend live spot data using a Gaussian bloom (500-mile / 800km radius of influence)
-                    blended_prob = base_prob
-                    if getattr(self, 'live_spots', None):
-                        max_spot_influence = 0.0
-                        
-                        for spot in self.live_spots:
-                            if abs(center_lat - spot['lat']) > 25.0: continue
-                            
-                            dist_km = haversine(center_lat, center_lon, spot['lat'], spot['lon'])
-                            if dist_km <= 3000.0:
-                                # The bullseye will accurately reflect the spot's calculated score color
-                                active_score = spot['score']
-                                
-                                # Refined Gaussian interpolation (sigma = 300km) to prevent distant high-scoring
-                                # spots from artificially bleeding backwards into the local dead skip-zone.
-                                w = math.exp(-(dist_km**2) / (2 * 300.0**2))
-                                influence = active_score * w
-                                
-                                if influence > max_spot_influence:
-                                    max_spot_influence = influence
-                                
-                        if max_spot_influence > 0:
-                            blended_prob = max(base_prob, max_spot_influence)
-                            blended_prob = max(0.0, min(100.0, blended_prob))
-
-                    # Pass the SW corner (lat, lon) to the map so it can draw the 1x2 degree box accurately
-                    heatmap_data.append([lat, lon, blended_prob / 100.0])
+                    # Pass the SW corner (lat, lon) to the map so it can draw the 2x4 degree box accurately
+                    heatmap_data.append([lat, lon, res.probability_pct / 100.0])
 
         self.signals.finished.emit(self.band, self.mode, json.dumps(heatmap_data))
 class MapBackend(QObject):
@@ -3163,7 +3164,7 @@ class POTAPropApp(QMainWindow):
 
         live_spots = []
         for c in self.compared_spots:
-            if c.spot.band == band and c.propagation and c.spot.latitude is not None and c.spot.longitude is not None:
+            if c.spot.band and c.spot.band.lower() == band.lower() and c.propagation and c.spot.latitude is not None and c.spot.longitude is not None:
                 if getattr(c.propagation, 'ray_mode', '') == 'QRT' or (c.propagation.spot_evidence and c.propagation.spot_evidence.is_qrt):
                     continue
                     
@@ -3556,7 +3557,7 @@ class POTAPropApp(QMainWindow):
         self.card_active = StatCard("Spots", "0", "#58a6ff")
         self.card_unique_parks = StatCard("Active Parks", "0", "#bc8cff")
         self.card_total_hunted = StatCard("Total in Log", "0", "#8b949e")
-        self.card_solar = StatCard("Space Weather", "SFI: -- | A: -- | K: -- | Flare: --", "#388bfd")
+        self.card_solar = StatCard("Space Weather", "SSN: -- | SFI: -- | A: -- | K: -- | Flare: --", "#388bfd")
         self.card_solar.setToolTip(self.solar_weather.format_tooltip_html())
         self.card_meteor = StatCard("Meteor Activity", "ZHR: -- | Shower: --", "#8b949e")
         self.card_lightning = StatCard("Lightning", "1", "#2ea043")
@@ -3569,7 +3570,7 @@ class POTAPropApp(QMainWindow):
         layout.addWidget(self.card_active, stretch=1)
         layout.addWidget(self.card_unique_parks, stretch=1)
         layout.addWidget(self.card_total_hunted, stretch=1)
-        layout.addWidget(self.card_solar, stretch=11)
+        layout.addWidget(self.card_solar, stretch=13)
         layout.addWidget(self.card_meteor, stretch=6)
         layout.addWidget(self.card_lightning, stretch=2)
         layout.addWidget(self.card_noise, stretch=4)
@@ -4695,7 +4696,7 @@ class POTAPropApp(QMainWindow):
             self.card_unique_parks.set_title("P2P Available")
             self.card_unique_parks.set_value(f"{p2p_count}")
         else:
-            self.card_unique_parks.set_title("Unique Active Parks")
+            self.card_unique_parks.set_title("Active Parks")
             self.card_unique_parks.set_value(f"{unique_active_parks}")
 
         self.card_new.set_value(f"{new_count}")
@@ -4706,7 +4707,7 @@ class POTAPropApp(QMainWindow):
         ov_lbl, ov_col, _ = self.solar_weather.get_overall_assessment()
         flare_str = self.solar_weather.xray_class if self.solar_weather.xray_class else "Normal"
         self.card_solar.set_value(
-            f"SFI: {int(self.solar_weather.sfi)} | A: {int(self.solar_weather.a_index)} | K: {int(self.solar_weather.k_index)} | Flare: {flare_str}"
+            f"SSN: {self.solar_weather.ssn} | SFI: {int(self.solar_weather.sfi)} | A: {int(self.solar_weather.a_index)} | K: {int(self.solar_weather.k_index)} | Flare: {flare_str}"
         )
         self.card_solar.set_accent_color(ov_col)
         self.card_solar.setToolTip(self.solar_weather.format_tooltip_html())

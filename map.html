@@ -74,9 +74,15 @@
     var darkLayer;
     
     // Live Doppler Radar
-    var radarLayer = null;
-    var radarOpacity = 0.65;
-    var radarTimer = null;
+    var rvRadarLayer = null;
+    var rvRadarOpacity = 0.65;
+    var rvRadarTimer = null;
+
+    var usRadarLayer = null;
+    var usRadarOpacity = 0.65;
+
+    // Transparent 1x1 pixel for missing tiles
+    var emptyTile = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
     function initMap(lat, lon) {
         if (map) return;
@@ -85,16 +91,26 @@
             center: [lat, lon],
             zoom: 3,
             worldCopyJump: true,
-            preferCanvas: true
+            preferCanvas: true,
+            maxZoom: 22
         });
+
 
         // OpenStreetMap basemap tiles
         lightLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-            attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+            maxZoom: 22,
+            maxNativeZoom: 18,
+            errorTileUrl: emptyTile,
+            noWrap: false
         });
         
         darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-            attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+            maxZoom: 22,
+            maxNativeZoom: 18,
+            errorTileUrl: emptyTile,
+            noWrap: false
         });
 
         // Add light layer by default (dark mode is unchecked by default)
@@ -112,8 +128,20 @@
         markersLayer.addTo(map);
 
         // Fetch initial live Doppler weather radar tiles
-        fetchRadarTiles();
-        radarTimer = setInterval(fetchRadarTiles, 600000); // 10 min refresh
+        fetchRvRadarTiles();
+        rvRadarTimer = setInterval(fetchRvRadarTiles, 600000); // 10 min refresh
+
+        // Initialize US NOAA Radar Layer
+        usRadarLayer = L.tileLayer('https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png', {
+            opacity: usRadarOpacity,
+            zIndex: 2,
+            tileSize: 256,
+            maxZoom: 22,
+            errorTileUrl: emptyTile,
+            noWrap: false,
+            bounds: [[20, -130], [50, -60]],
+            attribution: '&copy; <a href="https://mesonet.agron.iastate.edu/" style="color:#8b949e;" target="_blank">IEM / NOAA</a>'
+        });
 
         // Map Control for Band selection & Overlays
         var legend = L.control({position: 'topright'});
@@ -160,17 +188,23 @@
                             '</select>' +
                             '<div style="margin-top: 6px;"><b>Heatmap Opacity</b></div>' +
                             '<input type="range" id="opacity-slider" min="0" max="1" step="0.1" value="0.8" style="width: 100%;" oninput="window.changeOpacity(this.value)">' +
-                            '<div style="margin-top: 6px;"><b>Radar Opacity</b></div>' +
-                            '<input type="range" id="radar-opacity-slider" min="0" max="1" step="0.05" value="0.65" style="width: 100%;" oninput="window.changeRadarOpacity(this.value)">' +
                             '<div style="margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px;">' +
                             '<label><input type="checkbox" id="darkmap-check" onchange="window.toggleDarkMode()"> Dark Map Mode</label><br>' +
-                            '<label><input type="checkbox" id="radar-check" onchange="window.toggleRadar()"> Live Weather Radar</label><br>' +
                             '<label><input type="checkbox" id="grayline-check" onchange="window.toggleGrayline()"> Show Grayline</label><br>' +
                             '<label><input type="checkbox" id="lightning-check" onchange="window.updateLightningVisibility()"> Show Lightning Clusters</label>' +
                             '</div>' +
+                            '<div style="margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px;">' +
+                            '<label><input type="checkbox" id="rv-radar-check" onchange="window.toggleRvRadar()"> RainViewer Global Radar</label><br>' +
+                            '<input type="range" id="rv-radar-opacity-slider" min="0" max="1" step="0.05" value="0.65" style="width: 100%;" oninput="window.changeRvRadarOpacity(this.value)">' +
+                            '<div style="margin-top: 4px;">' +
+                            '<label><input type="checkbox" id="us-radar-check" onchange="window.toggleUsRadar()"> US NOAA Radar (Composite)</label><br>' +
+                            '<input type="range" id="us-radar-opacity-slider" min="0" max="1" step="0.05" value="0.65" style="width: 100%;" oninput="window.changeUsRadarOpacity(this.value)">' +
+                            '</div>' + // closes US radar sub-block
+                            '</div>' + // closes Radar block
                             '<div id="hover-score" style="margin-top: 8px; font-weight: bold; color: #58a6ff; text-align: center; height: 16px;">Hover map for score</div>' +
-                            '<div id="last-update" style="margin-top: 6px; font-size: 11px; color: #8b949e; text-align: center; border-top: 1px solid #30363d; padding-top: 5px;">Standby...</div>' +
-                            '</div>';
+                            '</div>' + // closes controls-content
+                            '<div id="last-update" style="margin-top: 8px; padding-top: 6px; padding-bottom: 2px; border-top: 1px solid #30363d; font-size: 11px; color: #8b949e; text-align: center; min-height: 16px; display: block;">Standby...</div>' +
+                            '</div>'; // closes controls
             
             L.DomEvent.disableClickPropagation(div);
             L.DomEvent.disableScrollPropagation(div);
@@ -188,7 +222,7 @@
     }
 
     // --- Live Doppler Weather Radar (RainViewer Open API) ---
-    function fetchRadarTiles() {
+    function fetchRvRadarTiles() {
         fetch('https://api.rainviewer.com/public/weather-maps.json')
             .then(function(res) { return res.json(); })
             .then(function(data) {
@@ -197,24 +231,28 @@
                     var tileUrl = data.host + latest.path + '/256/{z}/{x}/{y}/2/1_1.png';
                     
                     var newRadar = L.tileLayer(tileUrl, {
-                        opacity: radarOpacity,
+                        opacity: rvRadarOpacity,
                         zIndex: 2,
                         tileSize: 256,
+                        maxZoom: 22,
+                        maxNativeZoom: 8,
+                        errorTileUrl: emptyTile,
+                        noWrap: false,
                         attribution: '&copy; <a href="https://www.rainviewer.com/" style="color:#8b949e;" target="_blank">RainViewer</a>'
                     });
                     
-                    var shouldShow = (!document.getElementById('radar-check') || document.getElementById('radar-check').checked);
+                    var shouldShow = (!document.getElementById('rv-radar-check') || document.getElementById('rv-radar-check').checked);
                     if (shouldShow && map) {
-                        if (radarLayer && map.hasLayer(radarLayer)) {
-                            map.removeLayer(radarLayer);
+                        if (rvRadarLayer && map.hasLayer(rvRadarLayer)) {
+                            map.removeLayer(rvRadarLayer);
                         }
-                        radarLayer = newRadar;
-                        radarLayer.addTo(map);
+                        rvRadarLayer = newRadar;
+                        rvRadarLayer.addTo(map);
                     } else {
-                        if (radarLayer && map && map.hasLayer(radarLayer)) {
-                            map.removeLayer(radarLayer);
+                        if (rvRadarLayer && map && map.hasLayer(rvRadarLayer)) {
+                            map.removeLayer(rvRadarLayer);
                         }
-                        radarLayer = newRadar;
+                        rvRadarLayer = newRadar;
                     }
                 }
             })
@@ -223,25 +261,45 @@
             });
     }
 
-    window.toggleRadar = function() {
-        var isChecked = document.getElementById('radar-check').checked;
+    window.toggleRvRadar = function() {
+        var isChecked = document.getElementById('rv-radar-check').checked;
         if (isChecked) {
-            if (!radarLayer) {
-                fetchRadarTiles();
-            } else if (map && !map.hasLayer(radarLayer)) {
-                radarLayer.addTo(map);
+            if (!rvRadarLayer) {
+                fetchRvRadarTiles();
+            } else if (map && !map.hasLayer(rvRadarLayer)) {
+                rvRadarLayer.addTo(map);
             }
         } else {
-            if (radarLayer && map && map.hasLayer(radarLayer)) {
-                map.removeLayer(radarLayer);
+            if (rvRadarLayer && map && map.hasLayer(rvRadarLayer)) {
+                map.removeLayer(rvRadarLayer);
             }
         }
     };
 
-    window.changeRadarOpacity = function(val) {
-        radarOpacity = parseFloat(val);
-        if (radarLayer) {
-            radarLayer.setOpacity(radarOpacity);
+    window.changeRvRadarOpacity = function(val) {
+        rvRadarOpacity = parseFloat(val);
+        if (rvRadarLayer) {
+            rvRadarLayer.setOpacity(rvRadarOpacity);
+        }
+    };
+
+    window.toggleUsRadar = function() {
+        var isChecked = document.getElementById('us-radar-check').checked;
+        if (isChecked) {
+            if (usRadarLayer && map && !map.hasLayer(usRadarLayer)) {
+                usRadarLayer.addTo(map);
+            }
+        } else {
+            if (usRadarLayer && map && map.hasLayer(usRadarLayer)) {
+                map.removeLayer(usRadarLayer);
+            }
+        }
+    };
+
+    window.changeUsRadarOpacity = function(val) {
+        usRadarOpacity = parseFloat(val);
+        if (usRadarLayer) {
+            usRadarLayer.setOpacity(usRadarOpacity);
         }
     };
 
@@ -438,7 +496,7 @@
         if (lines && lines.length > 0) {
             lines.forEach(function(lineObj) {
                 if (lineObj.coords && lineObj.coords.length > 0) {
-                    var offsets = [0, -360.0, 360.0];
+                    var offsets = [0, -360.0, 360.0, -720.0, 720.0];
                     offsets.forEach(function(offset) {
                         var isMulti = Array.isArray(lineObj.coords[0]) && Array.isArray(lineObj.coords[0][0]);
                         var shiftedCoords = [];
@@ -569,7 +627,7 @@
                     
                     var color = getGradientColor(score);
                     
-                    var offsets = [0, -360.0, 360.0];
+                    var offsets = [0, -360.0, 360.0, -720.0, 720.0];
                     offsets.forEach(function(offset) {
                         var bounds = [[lat, lon + offset], [lat + 1.0, lon + offset + 2.0]];
                         var rect = L.rectangle(bounds, {

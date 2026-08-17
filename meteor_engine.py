@@ -36,22 +36,94 @@ MAJOR_SHOWERS = [
     MeteorShower("Ursids", 12, 22, 10, 5.0),
 ]
 
+SHOWER_DATABASE = {
+    "Quadrantids": {
+        "origin": "Asteroid 2003 EH1",
+        "history": "Discovered in the 1820s, it's one of the few major showers originating from an asteroid rather than a comet.",
+        "peak_date": "January 3"
+    },
+    "Lyrids": {
+        "origin": "Comet C/1861 G1 (Thatcher)",
+        "history": "One of the oldest known meteor showers, with records of observations by Chinese astronomers dating back to 687 BC.",
+        "peak_date": "April 22"
+    },
+    "Eta Aquariids": {
+        "origin": "Halley's Comet",
+        "history": "Created by debris left behind by the famous Halley's Comet. It's particularly strong in the Southern Hemisphere.",
+        "peak_date": "May 6"
+    },
+    "Southern Delta Aquariids": {
+        "origin": "Comet 96P/Machholz",
+        "history": "Discovered by Donald Machholz in 1986. Produces a steady stream of meteors lacking persistent trains.",
+        "peak_date": "July 30"
+    },
+    "Perseids": {
+        "origin": "Comet 109P/Swift-Tuttle",
+        "history": "Often the most spectacular shower of the year, famous for its bright meteors and long persistent trains. Known as the 'Tears of St. Lawrence'.",
+        "peak_date": "August 12"
+    },
+    "Orionids": {
+        "origin": "Halley's Comet",
+        "history": "The second shower created by Halley's Comet. Known for extremely fast meteors that occasionally leave glowing trains.",
+        "peak_date": "October 21"
+    },
+    "Leonids": {
+        "origin": "Comet 55P/Tempel-Tuttle",
+        "history": "Famous for producing historic 'meteor storms' every 33 years, some featuring tens of thousands of meteors per hour.",
+        "peak_date": "November 17"
+    },
+    "Geminids": {
+        "origin": "Asteroid 3200 Phaethon",
+        "history": "Often the strongest and most reliable shower of the year. Uniquely originates from a 'rock comet' (asteroid) instead of a regular icy comet.",
+        "peak_date": "December 14"
+    },
+    "Ursids": {
+        "origin": "Comet 8P/Tuttle",
+        "history": "A relatively minor shower that peaks right around the winter solstice, discovered in the early 20th century.",
+        "peak_date": "December 22"
+    }
+}
+
 
 @dataclass
 class MeteorActivity:
     zhr: int
     activity_level: str  # Low, Moderate, High, Storm
     active_shower: str
+    days_to_peak: int = 0
+    next_shower_name: str = ""
+    next_shower_days: int = 0
 
     def format_tooltip_html(self) -> str:
         lines = []
-        lines.append("<div style='font-family: sans-serif; font-size: 13px; min-width: 300px;'>")
+        lines.append("<div style='font-family: sans-serif; font-size: 13px; min-width: 300px; max-width: 350px;'>")
         lines.append("<div style='margin-bottom: 8px;'><b style='font-size: 15px; color: #bc8cff;'>Meteor Activity Analysis</b></div>")
         
         lines.append(f"<div style='margin-bottom: 4px;'><b>Active Shower:</b> <span style='color: #79c0ff;'>{self.active_shower}</span></div>")
         lines.append(f"<div style='margin-bottom: 4px;'><b>Zenithal Hourly Rate (ZHR):</b> <span style='color: #f1e05a;'>{self.zhr} meteors/hr</span></div>")
         lines.append(f"<div style='margin-bottom: 12px;'><b>Activity Level:</b> {self.activity_level}</div>")
         
+        if self.active_shower != "Sporadic Background" and self.active_shower in SHOWER_DATABASE:
+            info = SHOWER_DATABASE[self.active_shower]
+            lines.append("<hr style='border: 1px solid #30363d; margin: 8px 0;'>")
+            lines.append(f"<div style='margin-bottom: 4px; color: #58a6ff;'><b>{self.active_shower} Facts:</b></div>")
+            lines.append(f"<div style='margin-bottom: 4px;'><b>Origin:</b> {info['origin']}</div>")
+            lines.append(f"<div style='margin-bottom: 4px;'><b>Annual Peak:</b> {info['peak_date']}</div>")
+            
+            if self.days_to_peak > 0:
+                peak_str = f"<span style='color:#7ee787;'>Approaching peak in {self.days_to_peak} day(s).</span>"
+            elif self.days_to_peak < 0:
+                peak_str = f"<span style='color:#ffa657;'>Fading. Passed peak {-self.days_to_peak} day(s) ago.</span>"
+            else:
+                peak_str = f"<span style='color:#ff7b72;'><b>PEAKING TODAY!</b></span>"
+                
+            lines.append(f"<div style='margin-bottom: 6px;'><b>Status:</b> {peak_str}</div>")
+            lines.append(f"<div style='margin-bottom: 8px; font-size: 11px; color: #8b949e; line-height: 1.3;'><i>{info['history']}</i></div>")
+        elif self.active_shower == "Sporadic Background" and self.next_shower_name:
+            lines.append("<hr style='border: 1px solid #30363d; margin: 8px 0;'>")
+            lines.append(f"<div style='margin-bottom: 8px; color: #8b949e;'><i>Next major shower: <b>{self.next_shower_name}</b> peaks in {self.next_shower_days} days.</i></div>")
+        
+        lines.append("<hr style='border: 1px solid #30363d; margin: 8px 0;'>")
         lines.append("<div style='margin-bottom: 4px; color: #8b949e; font-size: 11px;'><i>Propagation Impact:</i></div>")
         if self.zhr >= 15:
             lines.append("<div style='margin-bottom: 4px;'>High meteor rates create ionized trails in the E-layer. This enables momentary <b>Meteor Scatter</b> propagation on 10m and 6m bands, often allowing QSOs over 500-1500 miles even when the F2 layer is closed.</div>")
@@ -60,6 +132,7 @@ class MeteorActivity:
             
         lines.append("</div>")
         return "".join(lines)
+
 
 
 def get_current_meteor_activity(dt_utc: datetime = None) -> MeteorActivity:
@@ -72,8 +145,12 @@ def get_current_meteor_activity(dt_utc: datetime = None) -> MeteorActivity:
         
     current_zhr = 5  # Sporadic background meteor rate is roughly 5-10
     active_shower_name = "Sporadic Background"
+    active_days_to_peak = 0
     
     current_day_of_year = dt_utc.timetuple().tm_yday
+    
+    next_shower_name = ""
+    next_shower_days = 999
     
     for shower in MAJOR_SHOWERS:
         # Create a dummy datetime for the peak in the current year to get day of year
@@ -84,11 +161,18 @@ def get_current_meteor_activity(dt_utc: datetime = None) -> MeteorActivity:
             continue # Leap year issues with Feb 29 etc.
             
         # Calculate distance in days, accounting for year wrap-around
-        diff_days = min(
-            abs(current_day_of_year - peak_day_of_year),
-            abs(current_day_of_year - (peak_day_of_year + 365)),
-            abs((current_day_of_year + 365) - peak_day_of_year)
-        )
+        days_to_peak_val = peak_day_of_year - current_day_of_year
+        if days_to_peak_val < -180:
+            days_to_peak_val += 365
+        elif days_to_peak_val > 180:
+            days_to_peak_val -= 365
+            
+        diff_days = abs(days_to_peak_val)
+        
+        # Track the next upcoming shower
+        if 0 < days_to_peak_val < next_shower_days:
+            next_shower_days = days_to_peak_val
+            next_shower_name = shower.name
         
         # If within the active duration, calculate the ZHR contribution using a Gaussian curve
         if diff_days <= shower.duration_days:
@@ -99,19 +183,15 @@ def get_current_meteor_activity(dt_utc: datetime = None) -> MeteorActivity:
             if contribution > current_zhr - 5: # Subtract sporadic background
                 current_zhr = int(5 + contribution)
                 active_shower_name = shower.name
+                active_days_to_peak = days_to_peak_val
 
-    # Determine activity level
-    level = "Low"
-    if current_zhr > 100:
+    if current_zhr >= 100:
         level = "Storm"
-    elif current_zhr >= 40:
+    elif current_zhr >= 30:
         level = "High"
     elif current_zhr >= 15:
         level = "Moderate"
+    else:
+        level = "Low"
 
-    return MeteorActivity(
-        zhr=current_zhr,
-        activity_level=level,
-        active_shower=active_shower_name
-    )
-
+    return MeteorActivity(zhr=current_zhr, activity_level=level, active_shower=active_shower_name, days_to_peak=active_days_to_peak, next_shower_name=next_shower_name, next_shower_days=next_shower_days)

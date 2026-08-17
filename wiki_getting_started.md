@@ -150,3 +150,17 @@ Once the app is running:
    * Toggle **Show Lightning Clusters** to see real-time thunderstorm cells with directional motion headings.
    * Toggle **Doppler Weather Radar** for live RainViewer precipitation sweeps (automatically updating every 5 minutes).
 
+---
+
+## Data Sources & Credits
+
+POTA Prop heavily relies on the incredible work of the following open platforms and data sources. Please consider supporting them or contributing to their crowdsourced networks:
+
+* **Parks on the Air (POTA)** - The core spot stream and park database. ([parksontheair.com](https://parksontheair.com))
+* **Blitzortung.org** - Real-time crowd-sourced lightning telemetry. ([blitzortung.org](https://www.blitzortung.org))
+* **RainViewer** - Live Doppler weather radar API. ([rainviewer.com](https://www.rainviewer.com))
+* **PSKReporter & RBN** - Live reverse beacon network spotting. ([pskreporter.info](https://pskreporter.info))
+* **Open-Meteo** - Excellent free, open-source weather API. ([open-meteo.com](https://open-meteo.com))
+* **NOAA SWPC** - Space weather data (SFI, K-index, A-index). ([swpc.noaa.gov](https://www.swpc.noaa.gov))
+* **Carto & OpenStreetMap** - Map rendering and basemap tiles.
+

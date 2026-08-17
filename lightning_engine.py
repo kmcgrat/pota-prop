@@ -703,8 +703,8 @@ class RegionalLightningSummary:
             return 0.0
 
         f = max(1.8, freq_mhz)
-        # Sferics susceptibility scales strongly with lower frequencies (~ 1/f^1.3)
-        freq_factor = (14.0 / f) ** 1.3
+        # Sferics susceptibility scales strongly with lower frequencies (~ 1/f^1.5)
+        freq_factor = (14.0 / f) ** 1.5
 
         total_surge = 0.0
         for cell in self.storm_cells:
@@ -712,13 +712,14 @@ class RegionalLightningSummary:
             if d_mi > MAX_QRN_RADIUS_MILES:
                 continue
             dist_weight = 1.0 / (1.0 + (d_mi / 100.0) ** 1.8)
-            surge_contrib = cell.intensity_weight * 7.0 * dist_weight * freq_factor
+            # Increase base multiplier to represent extreme impulse power of lightning
+            surge_contrib = cell.intensity_weight * 15.0 * dist_weight * freq_factor
             total_surge += surge_contrib
 
-        # Use 10*log10 to model the average power of static crashes (allowing DSP/human brain to listen between spikes)
-        effective_surge = 10.0 * math.log10(1.0 + total_surge)
-        # Cap at 20 dB (approx 3.5 S-units of average noise floor degradation)
-        return max(0.0, min(20.0, round(effective_surge, 1)))
+        # Use 10*log10 but with a powered total_surge to model the peak average power of static crashes
+        effective_surge = 10.0 * math.log10(1.0 + total_surge ** 2.0)
+        # Cap at 35 dB (approx 6 S-units of average noise floor degradation for nearby severe storms)
+        return max(0.0, min(35.0, round(effective_surge, 1)))
 
 
 # =====================================================================
@@ -831,7 +832,11 @@ class StrikeBuffer:
             # Time-weighted cluster intensity and active duration
             recent_15m = sum(1 for s in c if (now - s.timestamp_utc) <= 900.0)
             rate_per_min = max(1, int(round(recent_15m / 15.0))) if recent_15m > 0 else (1 if len(c) > 1 else 0)
-            weight = max(0.3, min(3.0, len(c) / 8.0)) if len(c) > 1 else 0.4
+            
+            # Base the intensity weight directly on the strike rate (strikes per minute)
+            # A severe storm (60+ strikes/min) gets the massive weight multiplier of 4.0
+            # An average pop-up storm (5-10 strikes/min) gets a standard weight (0.6 to 0.9)
+            weight = max(0.3, min(4.0, 0.3 + (rate_per_min / 60.0) * 3.7)) if len(c) > 1 else 0.3
 
             oldest_ts = min(s.timestamp_utc for s in c)
             active_window_min = max(1, min(60, int(math.ceil((now - oldest_ts) / 60.0))))
