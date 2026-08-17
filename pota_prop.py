@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 from map_server import MapServerManager
 
-APP_VERSION = "26.8.17-rc4"
+APP_VERSION = "26.8.17-rc5"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -3033,8 +3033,9 @@ class POTAPropApp(QMainWindow):
         use_browser = False
         if getattr(self, 'map_render_mode', MAP_RENDER_AUTO) == MAP_RENDER_BROWSER:
             use_browser = True
-        elif getattr(self, 'map_render_mode', MAP_RENDER_AUTO) == MAP_RENDER_AUTO and self.is_chromebook:
-            use_browser = True
+        elif getattr(self, 'map_render_mode', MAP_RENDER_AUTO) == MAP_RENDER_AUTO:
+            if self.is_chromebook or (sys.platform.startswith('linux') and getattr(sys, 'frozen', False)):
+                use_browser = True
 
         if use_browser:
             self.push_all_data_to_map()
