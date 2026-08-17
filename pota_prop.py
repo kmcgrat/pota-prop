@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 from map_server import MapServerManager
 
-APP_VERSION = "26.8.17-rc3"
+APP_VERSION = "26.8.17-rc4"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -5717,12 +5717,12 @@ class POTAPropApp(QMainWindow):
 def main():
     # Safe Chromium / QtWebEngine configuration across platforms
     if "QTWEBENGINE_CHROMIUM_FLAGS" not in os.environ:
-        if is_chromebook_crostini():
-            # Chromebook Crostini GPU drivers (virgl) fail with dma_buf compositor
+        if is_chromebook_crostini() or sys.platform.startswith('linux'):
+            # Linux GPU drivers (and especially AppImage bundles) frequently fail with QWebEngine GLX crashes
             os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
             os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --no-sandbox"
         else:
-            # Safe defaults enabling WebGL without forcing GLX aborts on headless or driver-mismatched Linux
+            # Safe defaults enabling WebGL without forcing GLX aborts on Windows/macOS
             os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--enable-webgl --ignore-gpu-blocklist"
 
     app = QApplication(sys.argv)
