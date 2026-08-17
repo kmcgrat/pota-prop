@@ -8,11 +8,6 @@ Compares your hunted parks history against live POTA active spots.
 import csv
 import os
 import sys
-
-if sys.platform.startswith("linux"):
-    os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
-    os.environ["QT_OPENGL"] = "software"
-
 import time
 import json
 import socket
@@ -24,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 
 from map_server import MapServerManager
 
-APP_VERSION = "26.8.17-rc5"
+APP_VERSION = "26.8.17-rc1"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -3033,9 +3028,8 @@ class POTAPropApp(QMainWindow):
         use_browser = False
         if getattr(self, 'map_render_mode', MAP_RENDER_AUTO) == MAP_RENDER_BROWSER:
             use_browser = True
-        elif getattr(self, 'map_render_mode', MAP_RENDER_AUTO) == MAP_RENDER_AUTO:
-            if self.is_chromebook or (sys.platform.startswith('linux') and getattr(sys, 'frozen', False)):
-                use_browser = True
+        elif getattr(self, 'map_render_mode', MAP_RENDER_AUTO) == MAP_RENDER_AUTO and self.is_chromebook:
+            use_browser = True
 
         if use_browser:
             self.push_all_data_to_map()
@@ -5718,10 +5712,13 @@ class POTAPropApp(QMainWindow):
 def main():
     # Safe Chromium / QtWebEngine configuration across platforms
     if "QTWEBENGINE_CHROMIUM_FLAGS" not in os.environ:
-        if is_chromebook_crostini() or sys.platform.startswith('linux'):
-            # Linux GPU drivers (and especially AppImage bundles) frequently fail with QWebEngine GLX crashes
+        if is_chromebook_crostini():
+            # Chromebook Crostini GPU drivers (virgl) fail with dma_buf compositor
             os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
             os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --no-sandbox"
+        elif sys.platform.startswith('linux'):
+            # On standard Linux (especially AppImages), forcing WebGL crashes GLX. Allow Chromium to safely fallback.
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox"
         else:
             # Safe defaults enabling WebGL without forcing GLX aborts on Windows/macOS
             os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--enable-webgl --ignore-gpu-blocklist"

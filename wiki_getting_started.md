@@ -22,9 +22,9 @@ Key features include:
 
 ---
 
-## Method 1: Using the Pre-compiled Executables (Easiest)
+## Method 1: Using the Pre-compiled Executables (Windows & Linux Only)
 
-For most users, using the pre-built executables is the fastest way to get started. You do not need to install Python or manage any dependencies.
+For Windows and regular Linux users, using the pre-built executables is the fastest way to get started. You do not need to install Python or manage any dependencies. *(Note: macOS and Chromebook Crostini users **can** use Method 2 below).*
 
 1. Go to the **[Releases](https://github.com/kmcgrat/pota-prop/releases)** page on GitHub.
 2. Download the package for your operating system:
@@ -49,7 +49,7 @@ For most users, using the pre-built executables is the fastest way to get starte
 
 ---
 
-## Method 2: Running Natively from Source Code (Power Users)
+## Method 2: Running Natively from Source Code (macOS, Chromebooks, & Power Users)
 
 If you are on **macOS**, a **Chromebook**, or want to run natively from Python on **Windows/Linux**, you can run the source code directly.
 

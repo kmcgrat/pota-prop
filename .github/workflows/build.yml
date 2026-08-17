@@ -39,7 +39,14 @@ jobs:
         shell: bash
         run: |
           sudo apt update
-          sudo apt install -y libxcb-cursor0 libgl1 libglx-mesa0
+          sudo apt install -y libxcb-cursor0 libgl1 libglx-mesa0 upx-ucl
+
+      # Windows Dependencies
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install upx
 
       # Python Requirements
       - name: Install Python requirements
@@ -54,9 +61,19 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "pota-prop" --add-data "pota_prop.png:." --add-data "map.html:." main.py
+          pyinstaller --noconfirm --onedir --windowed --name "pota-prop" --upx-dir=/usr/bin --exclude-module PyQt6.QtQml --exclude-module PyQt6.QtQuick --exclude-module PyQt6.QtSql --exclude-module PyQt6.QtSensors --exclude-module PyQt6.QtMultimedia --exclude-module PyQt6.QtBluetooth --exclude-module PyQt6.QtNfc --exclude-module PyQt6.QtWebSockets --exclude-module PyQt6.QtPositioning --exclude-module PyQt6.QtTest --add-data "pota_prop.png:." --add-data "map.html:." main.py
           mkdir -p AppDir/usr/bin
           cp -r dist/pota-prop/* AppDir/usr/bin/
+
+          # Remove graphics/system libraries that conflict with host proprietary drivers (NVIDIA/AMD) to fix GLX crashes
+          find AppDir/usr/bin -name "libGL*" -delete
+          find AppDir/usr/bin -name "libEGL*" -delete
+          find AppDir/usr/bin -name "libGLES*" -delete
+          find AppDir/usr/bin -name "libglx*" -delete
+          find AppDir/usr/bin -name "libdrm*" -delete
+          find AppDir/usr/bin -name "libgbm*" -delete
+          find AppDir/usr/bin -name "libstdc++*" -delete
+          find AppDir/usr/bin -name "libgcc_s*" -delete
 
           printf "[Desktop Entry]\nName=POTA Prop\nExec=pota-prop\nIcon=pota-prop\nType=Application\nCategories=Utility;\n" > AppDir/pota-prop.desktop
           touch AppDir/pota-prop.png
@@ -73,7 +90,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.png" --add-data "pota_prop.png;." --add-data "map.html;." main.py
+          pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.png" --exclude-module PyQt6.QtQml --exclude-module PyQt6.QtQuick --exclude-module PyQt6.QtSql --exclude-module PyQt6.QtSensors --exclude-module PyQt6.QtMultimedia --exclude-module PyQt6.QtBluetooth --exclude-module PyQt6.QtNfc --exclude-module PyQt6.QtWebSockets --exclude-module PyQt6.QtPositioning --exclude-module PyQt6.QtTest --add-data "pota_prop.png;." --add-data "map.html;." main.py
 
       # --- Artifact Uploads ---
       # Removed actions/upload-artifact steps to save storage quota. 
