@@ -10,7 +10,7 @@ from typing import Optional, Dict
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal, QUrl, QSettings, Qt, pyqtSlot
-from PyQt6.QtWidgets import QDialog, QVBoxLayout
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QWidget, QHBoxLayout, QLabel, QPushButton, QSizePolicy
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
 
@@ -30,6 +30,25 @@ def generate_pkce_pair() -> tuple[str, str]:
     digest = hashlib.sha256(code_verifier.encode('ascii')).digest()
     code_challenge = base64.urlsafe_b64encode(digest).decode('ascii').rstrip('=')
     return code_verifier, code_challenge
+
+_AUTH_PROFILE: Optional[QWebEngineProfile] = None
+
+def get_auth_profile() -> QWebEngineProfile:
+    """Returns a shared persistent QWebEngineProfile for POTA authentication."""
+    global _AUTH_PROFILE
+    if _AUTH_PROFILE is None:
+        from PyQt6.QtCore import QStandardPaths
+        app_data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+        storage_path = os.path.join(app_data, "pota_auth_profile")
+        os.makedirs(storage_path, exist_ok=True)
+
+        _AUTH_PROFILE = QWebEngineProfile("pota_auth_profile")
+        _AUTH_PROFILE.setPersistentStoragePath(storage_path)
+        _AUTH_PROFILE.setCachePath(os.path.join(storage_path, "Cache"))
+        _AUTH_PROFILE.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        _AUTH_PROFILE.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
+    return _AUTH_PROFILE
+
 
 class InterceptPage(QWebEnginePage):
     code_received = pyqtSignal(str)
@@ -59,43 +78,72 @@ class AuthWebBrowserDialog(QDialog):
         self.setWindowTitle("Sign In to POTA")
         self.resize(500, 650)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         
-        from PyQt6.QtCore import QStandardPaths
-        # Ensure a persistent profile is used so cookies and session data are stored on disk
-        app_data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
-        storage_path = os.path.join(app_data, "pota_auth_profile")
-        os.makedirs(storage_path, exist_ok=True)
-
-        self.profile = QWebEngineProfile("pota_auth_profile", self)
-        self.profile.setPersistentStoragePath(storage_path)
-        self.profile.setCachePath(os.path.join(storage_path, "Cache"))
-        self.profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
-        self.profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
-
+        self.profile = get_auth_profile()
         self.page = InterceptPage(self.profile, self)
         self.page.code_received.connect(self._on_code_received_from_page)
         
         self.webview = QWebEngineView(self)
         self.webview.setPage(self.page)
         
-        layout.addWidget(self.webview)
+        layout.addWidget(self.webview, 1)
         
-        # Privacy & cookie notice at the bottom
-        from PyQt6.QtWidgets import QLabel
-        lbl_notice = QLabel("Note: This secure sign-in window saves local authentication cookies to keep you logged in on this device. No personal data is tracked or shared.", self)
-        lbl_notice.setWordWrap(True)
-        lbl_notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_notice.setStyleSheet("""
-            color: #8b949e; 
-            font-size: 11px; 
-            background-color: #0d1117; 
-            padding: 8px 12px;
-            border-top: 1px solid #30363d;
+        # Privacy & cookie notice acknowledgment banner at the bottom
+        self.cookie_banner = QWidget(self)
+        self.cookie_banner.setObjectName("cookieBanner")
+        self.cookie_banner.setFixedHeight(46)
+        self.cookie_banner.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.cookie_banner.setStyleSheet("""
+            QWidget#cookieBanner {
+                background-color: #161b22;
+                border-top: 1px solid #30363d;
+                min-height: 46px;
+                max-height: 46px;
+            }
+            QLabel {
+                color: #c9d1d9;
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #238636;
+                color: #ffffff;
+                border: 1px solid #2ea043;
+                border-radius: 4px;
+                padding: 3px 14px;
+                font-size: 12px;
+                font-weight: bold;
+                height: 26px;
+                min-height: 26px;
+                max-height: 26px;
+            }
+            QPushButton:hover {
+                background-color: #2ea043;
+            }
+            QPushButton:pressed {
+                background-color: #1b4b27;
+            }
         """)
-        layout.addWidget(lbl_notice)
+        
+        banner_layout = QHBoxLayout(self.cookie_banner)
+        banner_layout.setContentsMargins(16, 8, 16, 8)
+        banner_layout.setSpacing(12)
+        
+        lbl_notice = QLabel("Notice: Local session cookies are saved to keep you signed in on this device.", self.cookie_banner)
+        banner_layout.addWidget(lbl_notice, 1)
+        
+        btn_ok = QPushButton("OK", self.cookie_banner)
+        btn_ok.setFixedWidth(52)
+        btn_ok.setFixedHeight(26)
+        btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_ok.clicked.connect(self.cookie_banner.hide)
+        banner_layout.addWidget(btn_ok, 0)
+        
+        layout.addWidget(self.cookie_banner, 0)
         
         self.webview.load(QUrl(auth_url))
         
@@ -103,6 +151,11 @@ class AuthWebBrowserDialog(QDialog):
     def _on_code_received_from_page(self, auth_code: str):
         self.code_received.emit(auth_code)
         self.accept()
+
+    def closeEvent(self, event):
+        if hasattr(self, 'webview') and self.webview:
+            self.webview.stop()
+        super().closeEvent(event)
 
 class POTAAuthenticator(QObject):
     """
@@ -120,6 +173,7 @@ class POTAAuthenticator(QObject):
         self._token_expiry = self.settings.value("token_expiry", 0, type=float)
         
         self._code_verifier = ""
+        self.browser = None
 
     def is_logged_in(self) -> bool:
         return bool(self._id_token)
@@ -140,6 +194,14 @@ class POTAAuthenticator(QObject):
 
     def start_login_flow(self, parent_widget=None):
         """Starts the OAuth login flow using an embedded web browser."""
+        if self.browser is not None:
+            try:
+                self.browser.close()
+                self.browser.deleteLater()
+            except Exception:
+                pass
+            self.browser = None
+
         self._code_verifier, code_challenge = generate_pkce_pair()
         
         params = {
@@ -156,7 +218,9 @@ class POTAAuthenticator(QObject):
         self.browser.show()
 
     def _on_code_received(self, auth_code: str):
-        """Handles the code received from the browser and exchanges it for tokens."""
+        """Handles the code received from the browser and exchanges it for tokens asynchronously."""
+        import threading
+        
         data = {
             "grant_type": "authorization_code",
             "client_id": CLIENT_ID,
@@ -169,15 +233,18 @@ class POTAAuthenticator(QObject):
             "Content-Type": "application/x-www-form-urlencoded"
         }
         
-        try:
-            resp = requests.post(f"{COGNITO_DOMAIN}/oauth2/token", data=data, headers=headers, timeout=10)
-            resp.raise_for_status()
-            tokens = resp.json()
-            self._save_tokens(tokens)
-            self.auth_state_changed.emit(True)
-        except Exception as e:
-            logger.error(f"Failed to exchange auth code for tokens: {e}")
-            self.auth_state_changed.emit(False)
+        def exchange_worker():
+            try:
+                resp = requests.post(f"{COGNITO_DOMAIN}/oauth2/token", data=data, headers=headers, timeout=10)
+                resp.raise_for_status()
+                tokens = resp.json()
+                self._save_tokens(tokens)
+                self.auth_state_changed.emit(True)
+            except Exception as e:
+                logger.error(f"Failed to exchange auth code for tokens: {e}")
+                self.auth_state_changed.emit(False)
+
+        threading.Thread(target=exchange_worker, daemon=True).start()
 
     def _save_tokens(self, tokens: Dict):
         """Saves tokens and calculates expiry time."""
@@ -207,9 +274,22 @@ class POTAAuthenticator(QObject):
         self.settings.remove("access_token")
         self.settings.remove("token_expiry")
         
-        # Also clear the browser profile so the user is actually signed out of Cognito
-        profile = QWebEngineProfile.defaultProfile()
-        profile.cookieStore().deleteAllCookies()
+        # Clear the auth browser profile cookies and cache completely
+        try:
+            profile = get_auth_profile()
+            profile.cookieStore().deleteAllCookies()
+            profile.clearHttpCache()
+            profile.clearAllVisitedLinks()
+        except Exception as e:
+            logger.debug(f"Error clearing auth profile cookies: {e}")
+            
+        if self.browser is not None:
+            try:
+                self.browser.close()
+                self.browser.deleteLater()
+            except Exception:
+                pass
+            self.browser = None
         
         self.auth_state_changed.emit(False)
 

@@ -2039,9 +2039,91 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
             # Cleanup
             window.close()
 
+    def test_map_render_modes_and_preferences(self):
+        """Test map render mode constants, Preferences combo box, and saving."""
+        from pota_prop import (
+            POTAPropApp,
+            SettingsDialog,
+            MAP_RENDER_AUTO,
+            MAP_RENDER_QT,
+            MAP_RENDER_BROWSER,
+        )
+        from PyQt6.QtCore import QSettings
+
+        window = POTAPropApp()
+        self.assertIsNotNone(window.map_server)
+        self.assertIn(window.map_render_mode, [MAP_RENDER_AUTO, MAP_RENDER_QT, MAP_RENDER_BROWSER])
+
+        # Test SettingsDialog
+        dlg = SettingsDialog(parent=window)
+        self.assertTrue(hasattr(dlg, "combo_map_mode"))
+        self.assertEqual(dlg.combo_map_mode.count(), 3)
+        
+        # Change to browser mode and simulate saving
+        idx = dlg.combo_map_mode.findData(MAP_RENDER_BROWSER)
+        self.assertGreaterEqual(idx, 0)
+        dlg.combo_map_mode.setCurrentIndex(idx)
+        self.assertEqual(dlg.combo_map_mode.currentData(), MAP_RENDER_BROWSER)
+
+        dlg.close()
+        window.close()
+
+    def test_show_map_window_browser_mode(self):
+        """Test that show_map_window uses open_map_browser when mode is browser."""
+        from unittest.mock import patch
+        from pota_prop import POTAPropApp, MAP_RENDER_BROWSER
+
+        window = POTAPropApp()
+        window.map_render_mode = MAP_RENDER_BROWSER
+
+        with patch("pota_prop.open_map_browser") as mock_open:
+            window.show_map_window()
+            self.assertTrue(mock_open.called)
+            # Ensure the URL contains the local map server port and auth token
+            called_url = mock_open.call_args[0][0]
+            self.assertIn(f"127.0.0.1:{window.map_server.port}", called_url)
+            self.assertIn(window.map_server.token, called_url)
+
+        window.close()
+
+    def test_show_map_window_safe_fallback(self):
+        """Test that show_map_window falls back to browser server if MapWindow throws an exception."""
+        from unittest.mock import patch
+        from pota_prop import POTAPropApp, MAP_RENDER_QT
+
+        window = POTAPropApp()
+        window.map_render_mode = MAP_RENDER_QT
+
+        with patch("pota_prop.MapWindow", side_effect=RuntimeError("GLX context creation failed")), \
+             patch("pota_prop.open_map_browser") as mock_open:
+            window.show_map_window()
+            self.assertTrue(mock_open.called)
+
+        window.close()
+
+
+    def test_auth_browser_cookie_banner(self):
+        """Test that AuthWebBrowserDialog displays the compact cookie banner and handles OK dismissal."""
+        from auth_engine import AuthWebBrowserDialog
+
+        dlg = AuthWebBrowserDialog("https://example.com/login")
+        self.assertTrue(hasattr(dlg, "cookie_banner"))
+        self.assertTrue(dlg.cookie_banner.isVisible())
+
+        # Simulate finding and clicking the OK button
+        from PyQt6.QtWidgets import QPushButton
+        btn_ok = dlg.cookie_banner.findChild(QPushButton)
+        self.assertIsNotNone(btn_ok)
+        btn_ok.click()
+
+        self.assertFalse(dlg.cookie_banner.isVisible())
+        dlg.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 
 
 

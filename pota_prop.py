@@ -19,7 +19,11 @@ from typing import Dict, List, Optional, Tuple
 
 from map_server import MapServerManager
 
-APP_VERSION = "26.8.16-rc1"
+APP_VERSION = "26.8.16-rc2"
+
+MAP_RENDER_AUTO = "auto"
+MAP_RENDER_QT = "qt"
+MAP_RENDER_BROWSER = "browser"
 
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
@@ -43,6 +47,61 @@ def is_chromebook_crostini() -> bool:
     except Exception:
         pass
     return False
+
+
+def open_map_browser(url: str):
+    """
+    Launch the Live Map in the system web browser or a dedicated frameless app window.
+    Supports Chrome, Chromium, Brave, Microsoft Edge, and standard default browsers.
+    """
+    import subprocess
+    import shutil
+    import platform
+    import os
+    import tempfile
+    import webbrowser
+    import logging
+
+    system = platform.system()
+    profile_dir = os.path.join(tempfile.gettempdir(), 'pota_map_profile')
+    
+    custom_env = os.environ.copy()
+    if system != "Windows" and system != "Darwin":
+        custom_env["GTK_THEME"] = "Adwaita:dark"
+        if is_chromebook_crostini():
+            custom_env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+
+    try:
+        if system == "Windows":
+            paths = [
+                shutil.which("chrome"),
+                shutil.which("msedge"),
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+            ]
+            for path in paths:
+                if path and os.path.exists(path):
+                    subprocess.Popen([path, f"--app={url}", "--password-store=basic", f"--user-data-dir={profile_dir}", "--force-dark-mode"], env=custom_env)
+                    return
+        elif system == "Darwin":
+            chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            if os.path.exists(chrome_path):
+                subprocess.Popen([chrome_path, f"--app={url}", "--password-store=basic", f"--user-data-dir={profile_dir}", "--force-dark-mode"], env=custom_env)
+                return
+        else:
+            for exe in ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium", "brave-browser", "microsoft-edge", "microsoft-edge-stable"]:
+                exe_path = shutil.which(exe)
+                if exe_path:
+                    if "garcon" in os.path.realpath(exe_path).lower():
+                        continue
+                    subprocess.Popen([exe, f"--app={url}", "--password-store=basic", f"--user-data-dir={profile_dir}", "--force-dark-mode"], env=custom_env)
+                    return
+    except Exception as e:
+        logging.error(f"Failed to open frameless app browser: {e}")
+
+    # Fallback to standard default browser tab
+    webbrowser.open(url)
 
 
 from PyQt6.QtCore import (
@@ -1471,6 +1530,18 @@ class SettingsDialog(QDialog):
         scroll.setMinimumHeight(80)
         
         form_layout.addRow("", scroll)
+
+        # Map Display Mode (Auto vs Embedded Qt vs External Browser)
+        self.combo_map_mode = QComboBox()
+        self.combo_map_mode.addItem("Auto-Detect (Recommended)", MAP_RENDER_AUTO)
+        self.combo_map_mode.addItem("Embedded Qt Window", MAP_RENDER_QT)
+        self.combo_map_mode.addItem("External Web Browser (HTTP Server)", MAP_RENDER_BROWSER)
+        
+        current_map_mode = getattr(parent, 'map_render_mode', MAP_RENDER_AUTO) if parent else MAP_RENDER_AUTO
+        mode_idx = self.combo_map_mode.findData(current_map_mode)
+        if mode_idx >= 0:
+            self.combo_map_mode.setCurrentIndex(mode_idx)
+        form_layout.addRow("Map Display Mode:", self.combo_map_mode)
         
         self.txt_rbn.textChanged.connect(self._update_distances)
         self.txt_grid.textChanged.connect(self._update_distances)
@@ -2736,13 +2807,12 @@ class POTAPropApp(QMainWindow):
         self.map_window = None
         self.browser_filter_signal.connect(self.handle_browser_filter_changed)
         self.is_chromebook = is_chromebook_crostini()
-        if self.is_chromebook:
-            resources_dir = get_resource_path(".")
-            self.map_server = MapServerManager(resources_dir)
-            self.map_server.set_filter_callback(lambda b, m, g: self.browser_filter_signal.emit(b, m, g))
-            self.map_server.start()
-        else:
-            self.map_server = None
+        
+        # Start local HTTP Map Server across all platforms for seamless browser support / fallback
+        resources_dir = get_resource_path(".")
+        self.map_server = MapServerManager(resources_dir)
+        self.map_server.set_filter_callback(lambda b, m, g: self.browser_filter_signal.emit(b, m, g))
+        self.map_server.start()
 
         self.map_timer = QTimer(self)
         self.map_timer.setInterval(600_000) # 10 minutes
@@ -2750,6 +2820,9 @@ class POTAPropApp(QMainWindow):
 
         # Settings, Operator Call, Grid, Station, P2P Mode, and Filters
         settings = QSettings("POTA", "HunterComparator")
+        self.map_render_mode = str(settings.value("map_render_mode", MAP_RENDER_AUTO)).strip().lower()
+        if self.map_render_mode not in (MAP_RENDER_AUTO, MAP_RENDER_QT, MAP_RENDER_BROWSER):
+            self.map_render_mode = MAP_RENDER_AUTO
         self.rbn_nodes_str = settings.value("rbn_nodes_str", settings.value("rbn_node", "W1AW", type=str), type=str)
         self.rbn_nodes_list = [c.strip().upper() for c in self.rbn_nodes_str.split(',') if c.strip()]
         if not self.rbn_nodes_list:
@@ -2949,46 +3022,45 @@ class POTAPropApp(QMainWindow):
         self.recalculate_map_heatmap(band, mode)
 
     def on_web_grayline_changed(self, show_grayline):
-        if show_grayline:
-            lines = []
-            def add_line(z, style):
-                p = calculate_grayline_polylines(z)
-                lines.append({"coords": p, "style": style})
-            add_line(90.0, {"color": "black", "weight": 2, "dashArray": ""})
-            add_line(96.0, {"color": "black", "weight": 1, "dashArray": "5, 5"})
-            add_line(84.0, {"color": "#777777", "weight": 1, "dashArray": "5, 5"})
-            if self.map_window:
-                self.map_window.update_grayline(lines)
-            if self.map_server:
-                self.map_server.update_data("grayline", lines)
-        else:
-            if self.map_window:
-                self.map_window.update_grayline([])
-            if self.map_server:
-                self.map_server.update_data("grayline", [])
+        pass  # Grayline coordinates are now pushed periodically by push_all_data_to_map, client toggles visibility locally.
 
     def show_map_window(self):
-        if self.is_chromebook:
+        use_browser = False
+        if getattr(self, 'map_render_mode', MAP_RENDER_AUTO) == MAP_RENDER_BROWSER:
+            use_browser = True
+        elif getattr(self, 'map_render_mode', MAP_RENDER_AUTO) == MAP_RENDER_AUTO and self.is_chromebook:
+            use_browser = True
+
+        if use_browser:
             self.push_all_data_to_map()
             if self.map_server:
-                webbrowser.open(self.map_server.get_url())
+                open_map_browser(self.map_server.get_url())
             if not self.map_timer.isActive():
                 self.map_timer.start()
             return
 
-        if not self.map_window:
-            self.map_window = MapWindow(self)
-        
-        self.map_window.show()
-        self.map_window.raise_()
-        self.map_window.activateWindow()
-        
-        self.push_all_data_to_map()
-        
-        if not self.map_timer.isActive():
-            self.map_timer.start()
+        try:
+            if not self.map_window:
+                self.map_window = MapWindow(self)
+            
+            self.map_window.show()
+            self.map_window.raise_()
+            self.map_window.activateWindow()
+            
+            self.push_all_data_to_map()
+            
+            if not self.map_timer.isActive():
+                self.map_timer.start()
+        except Exception as e:
+            logging.warning(f"Native Qt MapWindow failed to initialize ({e}). Falling back to browser server.")
+            self.push_all_data_to_map()
+            if self.map_server:
+                open_map_browser(self.map_server.get_url())
+            if not self.map_timer.isActive():
+                self.map_timer.start()
 
-    def push_all_data_to_map(self):
+    def update_map_spots_only(self):
+        """Pushes latest spot pins and band counts to the map without recalculating 10-minute propagation heatmap."""
         if not self.map_window and not self.map_server:
             return
             
@@ -3034,6 +3106,13 @@ class POTAPropApp(QMainWindow):
             self.map_window.update_band_counts(band_counts)
         if self.map_server:
             self.map_server.update_data("band_counts", band_counts)
+
+    def push_all_data_to_map(self):
+        """Pushes full map state (spots, grayline, lightning, and recomputes 10-minute propagation heatmap)."""
+        if not self.map_window and not self.map_server:
+            return
+            
+        self.update_map_spots_only()
         
         # Grayline
         lines = []
@@ -3052,19 +3131,30 @@ class POTAPropApp(QMainWindow):
         if getattr(self, 'lightning_summary', None):
             self.update_map_lightning(self.lightning_summary)
             
-        # Initial heatmap
-        self.recalculate_map_heatmap("20m", "SSB")
+        # 10-Minute Propagation Heatmap calculation
+        active_band = self.combo_band.currentText()
+        if not active_band or active_band in ("All", "All Bands"):
+            active_band = "20m"
+        active_mode = self.combo_mode.currentText()
+        if not active_mode or active_mode in ("All", "All Modes"):
+            active_mode = "SSB"
+        self.recalculate_map_heatmap(active_band, active_mode)
 
     def on_map_timer_tick(self):
         if (self.map_window and self.map_window.isVisible()) or self.map_server:
             self.push_all_data_to_map()
 
     def recalculate_map_heatmap(self, band: str, mode: str = "SSB"):
+        from datetime import datetime, timezone
+        now_str = datetime.now(timezone.utc).strftime("%H:%M")
+        
         if band == "All" or (not self.map_window and not self.map_server):
             if self.map_window:
                 self.map_window.update_heatmap("[]")
+                self.map_window.set_last_update(now_str)
             if self.map_server:
                 self.map_server.update_data("heatmap", "[]")
+                self.map_server.update_data("last_update", now_str)
             return
             
         home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
@@ -3115,7 +3205,10 @@ class POTAPropApp(QMainWindow):
         self._run_worker(worker)
 
     @pyqtSlot(str, str, str)
-    def on_map_heatmap_calculated(self, band, mode, heatmap_json):
+    def on_map_heatmap_calculated(self, band: str, mode: str, heatmap_json: str):
+        if heatmap_json and heatmap_json != "[]":
+            self._has_initial_heatmap = True
+            
         from datetime import datetime, timezone
         last_update = datetime.now(timezone.utc).strftime("%H:%M")
         if self.map_window:
@@ -3152,10 +3245,13 @@ class POTAPropApp(QMainWindow):
             new_rbn = dlg.txt_rbn.text().strip().upper()
             new_p2p_mode = dlg.chk_start_p2p.isChecked()
             new_p2p_park = dlg.txt_p2p_park.text().strip().upper()
+            new_map_mode = dlg.combo_map_mode.currentData() or MAP_RENDER_AUTO
             
             settings = QSettings("POTA", "HunterComparator")
             settings.setValue("p2p_mode", new_p2p_mode)
             settings.setValue("p2p_my_park", new_p2p_park)
+            settings.setValue("map_render_mode", new_map_mode)
+            self.map_render_mode = new_map_mode
             
             if new_call != self.my_call:
                 self.my_call = new_call
@@ -4691,9 +4787,12 @@ class POTAPropApp(QMainWindow):
             self.combo_mode.setCurrentIndex(0)
         self.combo_mode.blockSignals(False)
 
-        # Update map if active
-        if self.map_window and self.map_window.isVisible():
-            self.on_map_timer_tick()
+        # Update spots on map if active (without recalculating 10-minute propagation heatmap, unless it's the very first time spots arrive)
+        if (self.map_window and self.map_window.isVisible()) or self.map_server:
+            if not getattr(self, '_has_initial_heatmap', False) and len(self.compared_spots) > 0:
+                self.push_all_data_to_map()
+            else:
+                self.update_map_spots_only()
 
         self.apply_filters()
 
@@ -5602,6 +5701,7 @@ class POTAPropApp(QMainWindow):
         settings.setValue("filter_band", self.combo_band.currentText())
         settings.setValue("filter_mode", self.combo_mode.currentText())
         settings.setValue("refresh_interval_idx", self.combo_refresh.currentIndex())
+        settings.setValue("map_render_mode", getattr(self, 'map_render_mode', MAP_RENDER_AUTO))
         if getattr(self, 'map_server', None):
             self.map_server.stop()
         if getattr(self, 'map_window', None):
@@ -5610,9 +5710,15 @@ class POTAPropApp(QMainWindow):
 
 
 def main():
-    # Configure Chromium/WebEngine flags for standard machines
-    if "QTWEBENGINE_CHROMIUM_FLAGS" not in os.environ and not is_chromebook_crostini():
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-webgl"
+    # Safe Chromium / QtWebEngine configuration across platforms
+    if "QTWEBENGINE_CHROMIUM_FLAGS" not in os.environ:
+        if is_chromebook_crostini():
+            # Chromebook Crostini GPU drivers (virgl) fail with dma_buf compositor
+            os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --no-sandbox"
+        else:
+            # Safe defaults enabling WebGL without forcing GLX aborts on headless or driver-mismatched Linux
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--enable-webgl --ignore-gpu-blocklist"
 
     app = QApplication(sys.argv)
     app.setApplicationName("POTA Prop")

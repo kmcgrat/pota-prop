@@ -97,8 +97,8 @@
             attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
         });
 
-        // Add dark layer by default
-        darkLayer.addTo(map);
+        // Add light layer by default (dark mode is unchecked by default)
+        lightLayer.addTo(map);
         
         // Add home marker
         L.marker([lat, lon], {
@@ -113,7 +113,7 @@
 
         // Fetch initial live Doppler weather radar tiles
         fetchRadarTiles();
-        radarTimer = setInterval(fetchRadarTiles, 300000); // 5 min refresh
+        radarTimer = setInterval(fetchRadarTiles, 600000); // 10 min refresh
 
         // Map Control for Band selection & Overlays
         var legend = L.control({position: 'topright'});
@@ -130,8 +130,12 @@
             div.innerHTML = '<div id="controls">' +
                             '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">' +
                             '<div style="font-weight: bold; font-size: 13px; color: #58a6ff;">Propagation Controls</div>' +
+                            '<div>' +
+                            '<button onclick="window.toggleControls()" id="collapse-btn" style="background: transparent; border: none; color: #8b949e; cursor: pointer; font-size: 12px; margin-right: 5px; padding: 2px;" title="Collapse Controls">▼</button>' +
                             '<button onclick="window.toggleFullscreen()" style="background: #30363d; border: 1px solid #8b949e; color: #c9d1d9; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 12px;" title="Toggle Fullscreen">⛶</button>' +
                             '</div>' +
+                            '</div>' +
+                            '<div id="controls-content">' +
                             '<b>Band</b>' +
                             '<select id="band-select" style="margin-top: 3px; margin-bottom: 8px; width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px;" onchange="window.updateFilters()">' +
                             '<option value="All">All Spots (No Heatmap)</option>' +
@@ -149,7 +153,7 @@
                             '</select>' +
                             '<b>Mode</b><br>' +
                             '<select id="mode-select" style="margin-top: 3px; margin-bottom: 8px; width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px;" onchange="window.updateFilters()">' +
-                            '<option value="SSB">SSB (Voice)</option>' +
+                            '<option value="SSB" selected>SSB (Voice)</option>' +
                             '<option value="CW">CW (Morse)</option>' +
                             '<option value="FT8">FT8 (Digital)</option>' +
                             '<option value="FT4">FT4 (Digital)</option>' +
@@ -159,13 +163,17 @@
                             '<div style="margin-top: 6px;"><b>Radar Opacity</b></div>' +
                             '<input type="range" id="radar-opacity-slider" min="0" max="1" step="0.05" value="0.65" style="width: 100%;" oninput="window.changeRadarOpacity(this.value)">' +
                             '<div style="margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px;">' +
-                            '<label><input type="checkbox" id="darkmap-check" checked onchange="window.toggleDarkMode()"> Dark Map Mode</label><br>' +
-                            '<label><input type="checkbox" id="radar-check" checked onchange="window.toggleRadar()"> Live Weather Radar</label><br>' +
-                            '<label><input type="checkbox" id="grayline-check" onchange="window.updateFilters()"> Show Grayline</label><br>' +
+                            '<label><input type="checkbox" id="darkmap-check" onchange="window.toggleDarkMode()"> Dark Map Mode</label><br>' +
+                            '<label><input type="checkbox" id="radar-check" onchange="window.toggleRadar()"> Live Weather Radar</label><br>' +
+                            '<label><input type="checkbox" id="grayline-check" onchange="window.toggleGrayline()"> Show Grayline</label><br>' +
                             '<label><input type="checkbox" id="lightning-check" onchange="window.updateLightningVisibility()"> Show Lightning Clusters</label>' +
                             '</div>' +
                             '<div id="hover-score" style="margin-top: 8px; font-weight: bold; color: #58a6ff; text-align: center; height: 16px;">Hover map for score</div>' +
-                            '<div id="last-update" style="margin-top: 6px; font-size: 11px; color: #8b949e; text-align: center;"></div>';
+                            '<div id="last-update" style="margin-top: 6px; font-size: 11px; color: #8b949e; text-align: center; border-top: 1px solid #30363d; padding-top: 5px;">Standby...</div>' +
+                            '</div>';
+            
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
             return div;
         };
         legend.addTo(map);
@@ -269,11 +277,13 @@
 
     window.setLastUpdate = function(timeStr) {
         var el = document.getElementById('last-update');
-        if (el) {
-            if (timeStr.includes("Updating")) {
-                el.innerHTML = timeStr;
+        if (el && timeStr) {
+            if (timeStr.includes("Updating") || timeStr.includes("Standby")) {
+                el.innerHTML = '<span style="color: #f1e05a; font-weight: bold;">Updating... Standby...</span>';
+            } else if (timeStr === "N/A" || timeStr === "Standby...") {
+                el.innerHTML = '<span style="color: #8b949e;">Standby...</span>';
             } else {
-                el.innerHTML = "Last Updated: " + timeStr + " UTC";
+                el.innerHTML = '<span style="color: #7ee787;">Last Updated: ' + timeStr + ' UTC</span>';
             }
         }
     };
@@ -379,6 +389,22 @@
         }
     };
 
+    window.toggleControls = function() {
+        var content = document.getElementById('controls-content');
+        var btn = document.getElementById('collapse-btn');
+        if (content && btn) {
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                btn.innerHTML = '▼';
+                btn.title = 'Collapse Controls';
+            } else {
+                content.style.display = 'none';
+                btn.innerHTML = '▶';
+                btn.title = 'Expand Controls';
+            }
+        }
+    };
+
     window.setFilterState = function(band, mode) {
         var selectBand = document.getElementById('band-select');
         var selectMode = document.getElementById('mode-select');
@@ -393,12 +419,23 @@
         renderSpots();
     };
 
+    window.toggleGrayline = function() {
+        var isChecked = document.getElementById('grayline-check') ? document.getElementById('grayline-check').checked : false;
+        if (isChecked) {
+            graylineLines.forEach(function(l) { if (map) l.addTo(map); });
+        } else {
+            graylineLines.forEach(function(l) { if (map) map.removeLayer(l); });
+        }
+    };
+
     window.updateGrayline = function(lines_data) {
         graylineLines.forEach(function(l) { if (map) map.removeLayer(l); });
         graylineLines = [];
         
+        var isChecked = document.getElementById('grayline-check') ? document.getElementById('grayline-check').checked : false;
+        
         var lines = (typeof lines_data === 'string') ? JSON.parse(lines_data) : lines_data;
-        if (lines && lines.length > 0 && map) {
+        if (lines && lines.length > 0) {
             lines.forEach(function(lineObj) {
                 if (lineObj.coords && lineObj.coords.length > 0) {
                     var offsets = [0, -360.0, 360.0];
@@ -412,7 +449,10 @@
                         } else {
                             shiftedCoords = lineObj.coords.map(function(pt) { return [pt[0], pt[1] + offset]; });
                         }
-                        var l = L.polyline(shiftedCoords, lineObj.style).addTo(map);
+                        var l = L.polyline(shiftedCoords, lineObj.style);
+                        if (isChecked && map) {
+                            l.addTo(map);
+                        }
                         graylineLines.push(l);
                     });
                 }
@@ -564,11 +604,37 @@
         }
     };
 
+    // =======================================================================================
+    // DESIGN REQUIREMENT: PROPAGATION HEATMAP LIFECYCLE
+    // ---------------------------------------------------------------------------------------
+    // The propagation heatmap MUST be recalculated in the following scenarios:
+    // 1. Initial Load: An initial propagation map MUST be created when the live map is first started.
+    // 2. Filter Change: Every time the user changes the mode or band, the heatmap MUST immediately recalculate.
+    // 3. 10-Minute Cycle: The heatmap MUST automatically recalculate on a strict 10-minute cycle.
+    // Note: Do NOT recalculate the full propagation heatmap every time spot pins update (e.g. 15s).
+    // =======================================================================================
+
+    // =======================================================================================
+    // DESIGN REQUIREMENT: UI CONTROLS & INITIALIZATION STATE
+    // ---------------------------------------------------------------------------------------
+    // 1. Default Selection: Upon map startup, Band MUST default to 20m and Mode MUST default to SSB (Voice).
+    // 2. Unchecked by Default: All auxiliary checkboxes (Dark Map Mode, Live Weather Radar, Grayline, Lightning Clusters) MUST remain UNCHECKED and inactive on initial load.
+    // 3. Basemap: The map MUST initialize with the Light basemap layer to match the unchecked Dark Map Mode state.
+    // 4. Grayline Toggle: Checking/unchecking the Grayline checkbox MUST execute independently (via toggleGrayline) and MUST NOT trigger a propagation heatmap update.
+    // =======================================================================================
+
     // Automatic polling loop for standalone browser mode (e.g. ChromeOS host browser)
     (function() {
         var params = new URLSearchParams(window.location.search);
         var token = params.get('token');
         if (token) {
+            var lastSpotsStr = "";
+            var lastHeatmapStr = "";
+            var lastBandCountsStr = "";
+            var lastGraylineStr = "";
+            var lastLightningStr = "";
+            var lastUpdateStr = "";
+
             function fetchMapData() {
                 fetch('/api/map_data?token=' + encodeURIComponent(token))
                     .then(function(res) {
@@ -579,19 +645,52 @@
                         if (!map && data.home_lat !== undefined && data.home_lon !== undefined) {
                             initMap(data.home_lat, data.home_lon);
                         }
-                        if (data.spots !== undefined) window.updateSpots(data.spots);
-                        if (data.heatmap !== undefined) window.updateHeatmap(data.heatmap);
-                        if (data.band_counts !== undefined) window.updateBandCounts(data.band_counts);
-                        if (data.grayline !== undefined) window.updateGrayline(data.grayline);
-                        if (data.lightning !== undefined) window.updateLightning(data.lightning);
-                        if (data.last_update !== undefined) window.setLastUpdate(data.last_update);
+                        if (data.spots !== undefined) {
+                            var sStr = JSON.stringify(data.spots);
+                            if (sStr !== lastSpotsStr) {
+                                lastSpotsStr = sStr;
+                                window.updateSpots(data.spots);
+                            }
+                        }
+                        if (data.heatmap !== undefined) {
+                            var hStr = typeof data.heatmap === 'string' ? data.heatmap : JSON.stringify(data.heatmap);
+                            if (hStr !== lastHeatmapStr) {
+                                lastHeatmapStr = hStr;
+                                window.updateHeatmap(data.heatmap);
+                            }
+                        }
+                        if (data.band_counts !== undefined) {
+                            var bStr = JSON.stringify(data.band_counts);
+                            if (bStr !== lastBandCountsStr) {
+                                lastBandCountsStr = bStr;
+                                window.updateBandCounts(data.band_counts);
+                            }
+                        }
+                        if (data.grayline !== undefined) {
+                            var gStr = JSON.stringify(data.grayline);
+                            if (gStr !== lastGraylineStr) {
+                                lastGraylineStr = gStr;
+                                window.updateGrayline(data.grayline);
+                            }
+                        }
+                        if (data.lightning !== undefined) {
+                            var lStr = JSON.stringify(data.lightning);
+                            if (lStr !== lastLightningStr) {
+                                lastLightningStr = lStr;
+                                window.updateLightning(data.lightning);
+                            }
+                        }
+                        if (data.last_update !== undefined && data.last_update !== lastUpdateStr) {
+                            lastUpdateStr = data.last_update;
+                            window.setLastUpdate(data.last_update);
+                        }
                     })
                     .catch(function(err) {
                         console.warn("Map data polling error:", err);
                     });
             }
             fetchMapData();
-            setInterval(fetchMapData, 2500);
+            setInterval(fetchMapData, 5000);
         }
     })();
 </script>
