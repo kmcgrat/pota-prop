@@ -8,6 +8,11 @@ Compares your hunted parks history against live POTA active spots.
 import csv
 import os
 import sys
+
+if sys.platform.startswith("linux"):
+    os.environ["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    os.environ["QT_OPENGL"] = "software"
+
 import time
 import json
 import socket
@@ -19,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 from map_server import MapServerManager
 
-APP_VERSION = "26.8.16-rc2"
+APP_VERSION = "26.8.17-rc3"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
