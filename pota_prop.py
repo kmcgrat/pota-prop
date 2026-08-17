@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 
 from map_server import MapServerManager
 
-APP_VERSION = "26.8.17-rc1"
+APP_VERSION = "26.8.17-rc2"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"

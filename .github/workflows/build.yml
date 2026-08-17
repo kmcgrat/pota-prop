@@ -76,7 +76,7 @@ jobs:
           find AppDir/usr/bin -name "libgcc_s*" -delete
 
           printf "[Desktop Entry]\nName=POTA Prop\nExec=pota-prop\nIcon=pota-prop\nType=Application\nCategories=Utility;\n" > AppDir/pota-prop.desktop
-          touch AppDir/pota-prop.png
+          cp pota_prop.png AppDir/pota-prop.png
 
           printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "${0}")")"\nexport PATH="${HERE}/usr/bin:${PATH}"\nexport LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"\nexport QT_QPA_PLATFORM=xcb\nexec "${HERE}/usr/bin/pota-prop" "$@"\n' > AppDir/AppRun
           chmod +x AppDir/AppRun
@@ -90,7 +90,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.png" --exclude-module PyQt6.QtQml --exclude-module PyQt6.QtQuick --exclude-module PyQt6.QtSql --exclude-module PyQt6.QtSensors --exclude-module PyQt6.QtMultimedia --exclude-module PyQt6.QtBluetooth --exclude-module PyQt6.QtNfc --exclude-module PyQt6.QtWebSockets --exclude-module PyQt6.QtPositioning --exclude-module PyQt6.QtTest --add-data "pota_prop.png;." --add-data "map.html;." main.py
+          python -c "from PIL import Image; Image.open('pota_prop.png').save('pota_prop.ico')"
+          pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.ico" --exclude-module PyQt6.QtQml --exclude-module PyQt6.QtQuick --exclude-module PyQt6.QtSql --exclude-module PyQt6.QtSensors --exclude-module PyQt6.QtMultimedia --exclude-module PyQt6.QtBluetooth --exclude-module PyQt6.QtNfc --exclude-module PyQt6.QtWebSockets --exclude-module PyQt6.QtPositioning --exclude-module PyQt6.QtTest --add-data "pota_prop.png;." --add-data "map.html;." main.py
 
       # --- Artifact Uploads ---
       # Removed actions/upload-artifact steps to save storage quota. 
