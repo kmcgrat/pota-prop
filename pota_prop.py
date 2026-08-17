@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 
 from map_server import MapServerManager
 
-APP_VERSION = "26.8.17"
+APP_VERSION = "26.8.17-1"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -5270,18 +5270,18 @@ class POTAPropApp(QMainWindow):
             target_call = cs.spot.activator
             curr_w_status = worked_status
 
-            def on_cell_status_changed(index: int, ref=target_ref, call=target_call, w_stat=curr_w_status):
+            def on_cell_status_changed(index: int, ref=target_ref, call=target_call, w_stat=curr_w_status, r=row):
                 if w_stat == "TODAY":
                     if index == 1:
-                        self.toggle_park_worked(ref, force_state=False)
+                        self.toggle_park_worked(ref, force_state=False, row=r)
                 elif w_stat == "PREVIOUS_DAY":
                     if index == 1:
-                        self.toggle_park_worked(ref, force_state=True, activator_call=call)
+                        self.toggle_park_worked(ref, force_state=True, activator_call=call, row=r)
                     elif index == 2:
-                        self.toggle_park_worked(ref, force_state=False)
+                        self.toggle_park_worked(ref, force_state=False, row=r)
                 else:
                     if index == 1:
-                        self.toggle_park_worked(ref, force_state=True, activator_call=call)
+                        self.toggle_park_worked(ref, force_state=True, activator_call=call, row=r)
 
             combo_status.currentIndexChanged.connect(on_cell_status_changed)
             self.table.setCellWidget(row, 0, combo_status)
@@ -5299,10 +5299,10 @@ class POTAPropApp(QMainWindow):
             return item.data(Qt.ItemDataRole.UserRole)
         return None
 
-    def prompt_spot_on_pota(self, park_ref: str, activator_call: str = ""):
+    def prompt_spot_on_pota(self, park_ref: str, activator_call: str = "", row: int = -1):
 
         """
-        Prompt dialog encouraging the hunter to open pota.app to re-spot the activator
+        Prompt dialog encouraging the hunter to re-spot the activator
         after marking a park worked.
         """
         if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
@@ -5314,7 +5314,7 @@ class POTAPropApp(QMainWindow):
 
         call_str = f" with {activator_call}" if activator_call else ""
         dlg = QDialog(self)
-        dlg.setWindowTitle("Spot Activator on pota.app")
+        dlg.setWindowTitle("Spot Activator")
         dlg.setFixedSize(480, 220)
         dlg.setStyleSheet(DARK_STYLESHEET)
 
@@ -5322,13 +5322,13 @@ class POTAPropApp(QMainWindow):
         layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(12)
 
-        lbl_title = QLabel("Re-Spot Activator on pota.app?")
+        lbl_title = QLabel("Re-Spot Activator?")
         lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #58a6ff;")
         layout.addWidget(lbl_title)
 
         msg_label = QLabel(
             f"Congratulations on working park {park_ref}{call_str}!\n\n"
-            "Would you like to open pota.app to re-spot this activator? "
+            "Would you like to re-spot this activator? "
             "Re-spotting helps fellow hunters verify live propagation openings in real-time."
         )
         msg_label.setWordWrap(True)
@@ -5342,7 +5342,7 @@ class POTAPropApp(QMainWindow):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
-        btn_spot = QPushButton("Open pota.app to Spot")
+        btn_spot = QPushButton("Open Spot Dialog")
         btn_spot.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_spot.setStyleSheet("""
             QPushButton {
@@ -5361,8 +5361,11 @@ class POTAPropApp(QMainWindow):
         def on_spot_clicked():
             if chk_no_prompt.isChecked():
                 settings.setValue("prompt_spot_on_worked", False)
-            webbrowser.open(f"https://pota.app/#/park/{park_ref}")
             dlg.accept()
+            if row >= 0:
+                self.open_spot_dialog(row)
+            else:
+                webbrowser.open(f"https://pota.app/#/park/{park_ref}")
 
         btn_spot.clicked.connect(on_spot_clicked)
         btn_layout.addWidget(btn_spot)
@@ -5393,7 +5396,7 @@ class POTAPropApp(QMainWindow):
         layout.addLayout(btn_layout)
         dlg.exec()
 
-    def toggle_park_worked(self, park_ref: str, force_state: Optional[bool] = None, activator_call: str = "", skip_prompt: bool = False):
+    def toggle_park_worked(self, park_ref: str, force_state: Optional[bool] = None, activator_call: str = "", skip_prompt: bool = False, row: int = -1):
         ref = normalize_ref(park_ref)
         if not ref:
             return
@@ -5417,12 +5420,14 @@ class POTAPropApp(QMainWindow):
         self.recompute_comparisons()
 
         if is_now_worked and not skip_prompt:
-            self.prompt_spot_on_pota(ref, activator_call)
+            self.prompt_spot_on_pota(ref, activator_call, row)
 
     def toggle_selected_park_worked(self):
         cs = self.get_selected_compared_spot()
         if cs and cs.spot.reference:
-            self.toggle_park_worked(cs.spot.reference, activator_call=cs.spot.activator)
+            selected_rows = self.table.selectionModel().selectedRows()
+            row = selected_rows[0].row() if selected_rows else -1
+            self.toggle_park_worked(cs.spot.reference, activator_call=cs.spot.activator, row=row)
 
     def on_table_selection_changed(self):
         cs = self.get_selected_compared_spot()
