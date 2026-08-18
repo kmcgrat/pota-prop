@@ -38,8 +38,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo apt update
-          sudo apt install -y libxcb-cursor0 libgl1 libglx-mesa0 upx-ucl
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libxcb-cursor0 libgl1 libglx-mesa0 upx-ucl
 
       # Windows Dependencies
       - name: Install Windows dependencies
