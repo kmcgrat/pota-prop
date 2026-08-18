@@ -27,13 +27,32 @@ NOAA_K_INDEX_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-ind
 NOAA_A_INDEX_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-a-index.json"
 NOAA_GOES_XRAY_URL = "https://services.swpc.noaa.gov/json/goes/primary/xrays-6-hour.json"
 NOAA_HPI_URL = "https://services.swpc.noaa.gov/text/aurora-nowcast-hemi-power.txt"
-NOAA_SSN_URL = "https://services.swpc.noaa.gov/text/daily-solar-indices.txt"
 NOAA_3DAY_FORECAST_URL = "https://services.swpc.noaa.gov/text/3-day-forecast.txt"
-NOAA_HPI_URL = "https://services.swpc.noaa.gov/text/aurora-nowcast-hemi-power.txt"
-NOAA_SSN_URL = "https://services.swpc.noaa.gov/text/daily-solar-indices.txt"
+NOAA_27DAY_OUTLOOK_URL = "https://services.swpc.noaa.gov/text/27-day-outlook.txt"
 
 DEFAULT_HOME_GRID = "EM98dh"
 EARTH_RADIUS_KM = 6371.0
+
+
+@dataclass
+class SpaceWeather3DayForecast:
+    days: List[str] = field(default_factory=lambda: ["Day 1", "Day 2", "Day 3"])
+    sfi_forecast: List[float] = field(default_factory=lambda: [145.0, 145.0, 145.0])
+    ap_forecast: List[int] = field(default_factory=lambda: [8, 8, 8])
+    kp_max_forecast: List[float] = field(default_factory=lambda: [2.0, 2.0, 2.0])
+    m_flare_prob: List[int] = field(default_factory=lambda: [15, 15, 15])
+    x_flare_prob: List[int] = field(default_factory=lambda: [1, 1, 1])
+    proton_prob: List[int] = field(default_factory=lambda: [1, 1, 1])
+    geomag_scale: List[str] = field(default_factory=lambda: ["G0", "G0", "G0"])
+    synopsis: str = ""
+
+
+@dataclass
+class SpaceWeather27DayOutlook:
+    daily_projections: List[Tuple[str, float, int]] = field(default_factory=list)  # (date_str, sfi, ap)
+    sfi_7day_avg: float = 145.0
+    sfi_peak_window: str = "N/A"
+    recurrent_storm_window: str = "N/A"
 
 
 @dataclass
@@ -52,6 +71,8 @@ class SolarWeather:
     updated_at: str = "Cached"
     source: str = "NOAA SWPC / GOES"
     meteor_activity: Optional[MeteorActivity] = None
+    forecast_3day: Optional[SpaceWeather3DayForecast] = None
+    outlook_27day: Optional[SpaceWeather27DayOutlook] = None
 
     @property
     def storm_condition(self) -> str:
@@ -243,12 +264,18 @@ class SolarWeather:
         if self.k_forecast != "N/A":
             try:
                 kf = float(self.k_forecast)
-                if kf >= 5:
-                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> The planetary K-index is forecast to rise to {int(kf)}, indicating an impending major geomagnetic storm. Expect degrading conditions, increased signal absorption, and a suppressed F2 layer."
-                elif kf == 4:
-                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> The planetary K-index is forecast to reach {int(kf)}, leading to unsettled geomagnetic conditions. Watch for potential high-latitude fading and brief periods of noise."
-                elif kf <= 3:
-                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Conditions are forecast to remain relatively stable with a quiet K-index of {int(kf)}."
+                if kf >= 7:
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index is forecast to reach {kf:.1f} (NOAA G3-G5 Strong/Severe Storm). Expect high signal absorption, severe flutter fading, and depressed MUFs."
+                elif kf >= 6:
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index is forecast to reach {kf:.1f} (NOAA G2 Moderate Storm). Expect high-latitude HF degradation spreading to mid-latitudes."
+                elif kf >= 5:
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index is forecast to reach {kf:.1f} (NOAA G1 Minor Storm). Expect degraded high-latitude HF propagation and signal flutter on polar routes."
+                elif kf >= 4:
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index is forecast to reach {kf:.1f} (Active). Watch for potential high-latitude flutter and brief noise periods."
+                elif kf >= 3:
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Conditions are forecast to remain unsettled near Kp {kf:.1f} with nominal HF propagation."
+                else:
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Conditions are forecast to remain quiet and stable near Kp {kf:.1f}."
             except ValueError:
                 pass
 
@@ -361,6 +388,72 @@ class SolarWeather:
         )
 
         lines.append("</table>")
+
+        if self.forecast_3day and len(self.forecast_3day.days) >= 3:
+            f = self.forecast_3day
+            d1, d2, d3 = f.days[0], f.days[1], f.days[2]
+            lines.append(
+                "<div style='margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px; font-weight: bold; color: #58a6ff; font-size: 11px;'>"
+                "NOAA SWPC 3-Day Space Weather Forecast:</div>"
+            )
+            lines.append("<table style='font-size: 11px; color: #c9d1d9; border-collapse: collapse; width: 100%; margin-top: 4px;'>")
+            lines.append(
+                f"<tr style='color: #8b949e; border-bottom: 1px solid #21262d;'>"
+                f"<td style='padding: 2px 4px 2px 0;'><b>Metric</b></td>"
+                f"<td style='padding: 2px 4px; text-align: center;'><b>{d1}</b></td>"
+                f"<td style='padding: 2px 4px; text-align: center;'><b>{d2}</b></td>"
+                f"<td style='padding: 2px 4px; text-align: center;'><b>{d3}</b></td>"
+                f"</tr>"
+            )
+            lines.append(
+                f"<tr style='border-bottom: 1px solid #21262d;'>"
+                f"<td style='padding: 2px 4px 2px 0;'>10.7cm Solar Flux:</td>"
+                f"<td style='padding: 2px 4px; text-align: center; color: #58a6ff;'>{f.sfi_forecast[0]:.0f}</td>"
+                f"<td style='padding: 2px 4px; text-align: center; color: #58a6ff;'>{f.sfi_forecast[1]:.0f}</td>"
+                f"<td style='padding: 2px 4px; text-align: center; color: #58a6ff;'>{f.sfi_forecast[2]:.0f}</td>"
+                f"</tr>"
+            )
+            lines.append(
+                f"<tr style='border-bottom: 1px solid #21262d;'>"
+                f"<td style='padding: 2px 4px 2px 0;'>Planetary A-Index:</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.ap_forecast[0]}</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.ap_forecast[1]}</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.ap_forecast[2]}</td>"
+                f"</tr>"
+            )
+            lines.append(
+                f"<tr style='border-bottom: 1px solid #21262d;'>"
+                f"<td style='padding: 2px 4px 2px 0;'>Peak Kp / Storm:</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.kp_max_forecast[0]:.1f} ({f.geomag_scale[0]})</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.kp_max_forecast[1]:.1f} ({f.geomag_scale[1]})</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.kp_max_forecast[2]:.1f} ({f.geomag_scale[2]})</td>"
+                f"</tr>"
+            )
+            lines.append(
+                f"<tr style='border-bottom: 1px solid #21262d;'>"
+                f"<td style='padding: 2px 4px 2px 0;'>M-Class Flare (R1-R2):</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.m_flare_prob[0]}%</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.m_flare_prob[1]}%</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.m_flare_prob[2]}%</td>"
+                f"</tr>"
+            )
+            lines.append(
+                f"<tr style='border-bottom: 1px solid #21262d;'>"
+                f"<td style='padding: 2px 4px 2px 0;'>X-Class Flare (R3+):</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.x_flare_prob[0]}%</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.x_flare_prob[1]}%</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.x_flare_prob[2]}%</td>"
+                f"</tr>"
+            )
+            lines.append(
+                f"<tr>"
+                f"<td style='padding: 2px 4px 2px 0;'>Proton Storm (S1+):</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.proton_prob[0]}%</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.proton_prob[1]}%</td>"
+                f"<td style='padding: 2px 4px; text-align: center;'>{f.proton_prob[2]}%</td>"
+                f"</tr>"
+            )
+            lines.append("</table>")
 
         lines.append(
             "<div style='margin-top: 8px; font-size: 10px; color: #8b949e; border-top: 1px solid #30363d; padding-top: 4px;'>"
@@ -525,10 +618,10 @@ ANTENNA_PRESETS: Dict[str, Dict[str, Any]] = {
     "RUBBER_DUCK": {
         "key": "RUBBER_DUCK",
         "name": "Rubber Duck / HT",
-        "hf_gain_db": -22.0,
+        "hf_gain_db": -30.0,
         "vhf_gain_db": -6.5,
-        "nvis_gain_db": -22.0,
-        "desc": "Handheld HT rubber duck — extreme compromise on HF (-22 dBi), weak VHF",
+        "nvis_gain_db": -34.0,
+        "desc": "Handheld HT rubber duck — extreme compromise on HF (-30 dBi), weak VHF (-6.5 dBi)",
     },
 }
 
@@ -707,12 +800,12 @@ def resolve_operator_location_context(
     is_us = bool(call_district) or (state in US_STATE_CALL_DISTRICT)
 
     if not is_us and user_call:
-        from data_engine import POTA_PREFIX_TO_COUNTRY
+        from data_engine import ITU_CALLSIGN_TO_COUNTRY
         country = None
         clean_call = user_call.upper().strip()
         for i in range(len(clean_call), 0, -1):
-            if clean_call[:i] in POTA_PREFIX_TO_COUNTRY:
-                country = POTA_PREFIX_TO_COUNTRY[clean_call[:i]]
+            if clean_call[:i] in ITU_CALLSIGN_TO_COUNTRY:
+                country = ITU_CALLSIGN_TO_COUNTRY[clean_call[:i]]
                 break
         
         if country:
@@ -846,10 +939,10 @@ class CallsignResolver:
                 call_area = m.group(1) if m else None
                 state_val = f"{call_area}-Land" if call_area else None
             else:
-                from data_engine import POTA_PREFIX_TO_COUNTRY
+                from data_engine import ITU_CALLSIGN_TO_COUNTRY
                 for i in range(len(call), 0, -1):
-                    if call[:i] in POTA_PREFIX_TO_COUNTRY:
-                        state_val = POTA_PREFIX_TO_COUNTRY[call[:i]]
+                    if call[:i] in ITU_CALLSIGN_TO_COUNTRY:
+                        state_val = ITU_CALLSIGN_TO_COUNTRY[call[:i]]
                         break
                 if not state_val:
                     state_val = "DX"
@@ -1233,8 +1326,11 @@ def fetch_live_solar_weather(timeout: int = 5, force: bool = False, max_age_seco
     except Exception as e:
         logger.debug("Failed to fetch NOAA SSN: %s", e)
 
-    # 7. Fetch 3-Day K-Index Forecast
+    # 7. Fetch 3-Day Forecast and 27-Day Outlook
     k_forecast = "N/A"
+    forecast_3day = None
+    outlook_27day = None
+
     try:
         req = urllib.request.Request(
             NOAA_3DAY_FORECAST_URL,
@@ -1245,8 +1341,20 @@ def fetch_live_solar_weather(timeout: int = 5, force: bool = False, max_age_seco
             match = re.search(r"greatest expected 3 hr Kp for.*?is\s+([0-9.]+)", forecast_text)
             if match:
                 k_forecast = match.group(1)
+            forecast_3day = parse_noaa_3day_forecast(forecast_text, current_sfi=sfi, current_ap=int(a_index))
     except Exception as e:
-        logger.debug("Failed to fetch NOAA K-index Forecast: %s", e)
+        logger.debug("Failed to fetch NOAA 3-Day Forecast: %s", e)
+
+    try:
+        req = urllib.request.Request(
+            NOAA_27DAY_OUTLOOK_URL,
+            headers={"User-Agent": "POTA-Hunter-Comparator/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            outlook_text = resp.read().decode("utf-8")
+            outlook_27day = parse_noaa_27day_outlook(outlook_text, current_sfi=sfi)
+    except Exception as e:
+        logger.debug("Failed to fetch NOAA 27-Day Outlook: %s", e)
 
     if k_index <= 1:
         cond = "Quiet (Excellent)"
@@ -1278,10 +1386,161 @@ def fetch_live_solar_weather(timeout: int = 5, force: bool = False, max_age_seco
         updated_at=updated,
         source="NOAA SWPC / GOES",
         meteor_activity=meteor,
+        forecast_3day=forecast_3day,
+        outlook_27day=outlook_27day,
     )
 
     _SOLAR_CACHE_TIME = now
     _SOLAR_CACHE_DATA = res
+    return res
+
+
+def parse_noaa_3day_forecast(text: str, current_sfi: float = 145.0, current_ap: int = 8) -> SpaceWeather3DayForecast:
+    """Parses NOAA SWPC 3-Day Forecast text product into structured forecast metrics."""
+    res = SpaceWeather3DayForecast()
+    if not text:
+        return res
+
+    # 1. Parse Day Labels from NOAA Kp breakdown header
+    date_match = re.search(r"NOAA Kp index breakdown\s+([A-Za-z]+ \d+-[A-Za-z]+ \d+)", text)
+    header_days = re.findall(r"([A-Za-z]{3}\s+\d{1,2})", text[:1200])
+    if len(header_days) >= 3:
+        res.days = header_days[:3]
+
+    # 2. Parse 3-hourly Kp table for each day
+    kp_day1, kp_day2, kp_day3 = [], [], []
+    for line in text.splitlines():
+        # Match lines like "00-03UT       4.00         3.67         4.00"
+        m = re.search(r"\d{2}-\d{2}UT\s+([\d.]+)(?:\s*\([A-Z0-9]+\))?\s+([\d.]+)(?:\s*\([A-Z0-9]+\))?\s+([\d.]+)", line)
+        if m:
+            try:
+                kp_day1.append(float(m.group(1)))
+                kp_day2.append(float(m.group(2)))
+                kp_day3.append(float(m.group(3)))
+            except ValueError:
+                pass
+
+    if kp_day1 and kp_day2 and kp_day3:
+        res.kp_max_forecast = [round(max(kp_day1), 2), round(max(kp_day2), 2), round(max(kp_day3), 2)]
+    else:
+        res.kp_max_forecast = [2.0, 2.0, 2.0]
+
+    # 3. Geomagnetic Storm scale per day
+    def kp_to_scale(kp):
+        if kp >= 7.0: return "G3 (Strong)"
+        if kp >= 6.0: return "G2 (Moderate)"
+        if kp >= 5.0: return "G1 (Minor Storm)"
+        if kp >= 4.0: return "G0 (Active)"
+        if kp >= 3.0: return "G0 (Unsettled)"
+        return "G0 (Quiet)"
+
+    res.geomag_scale = [kp_to_scale(k) for k in res.kp_max_forecast]
+
+    # 4. Parse Solar Flux (10 cm Radio Flux)
+    sfi_matches = re.findall(r"10\s*cm\s*(?:Radio\s*Flux)?\s*[:\s]+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", text, re.IGNORECASE)
+    if sfi_matches:
+        try:
+            res.sfi_forecast = [float(sfi_matches[0][0]), float(sfi_matches[0][1]), float(sfi_matches[0][2])]
+        except (ValueError, IndexError):
+            res.sfi_forecast = [current_sfi, current_sfi, current_sfi]
+    else:
+        # Fallback extrapolation from current SFI
+        res.sfi_forecast = [current_sfi, current_sfi, current_sfi]
+
+    # 5. Parse Planetary A-Index
+    ap_matches = re.findall(r"(?:Planetary\s*A-index|Ap)\s*[:\s]+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", text, re.IGNORECASE)
+    if ap_matches:
+        try:
+            res.ap_forecast = [int(ap_matches[0][0]), int(ap_matches[0][1]), int(ap_matches[0][2])]
+        except (ValueError, IndexError):
+            res.ap_forecast = [current_ap, current_ap, current_ap]
+    else:
+        # Approximate Ap from max Kp
+        res.ap_forecast = [max(4, int(k * 3.5)) for k in res.kp_max_forecast]
+
+    # 6. Parse Flare Probabilities (Class M and Class X) and Protons
+    m_match = re.search(r"Class\s*M\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", text, re.IGNORECASE)
+    if m_match:
+        try:
+            res.m_flare_prob = [int(m_match.group(1)), int(m_match.group(2)), int(m_match.group(3))]
+        except ValueError:
+            res.m_flare_prob = [25, 25, 25]
+
+    x_match = re.search(r"Class\s*X\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", text, re.IGNORECASE)
+    if x_match:
+        try:
+            res.x_flare_prob = [int(x_match.group(1)), int(x_match.group(2)), int(x_match.group(3))]
+        except ValueError:
+            res.x_flare_prob = [5, 5, 5]
+
+    prot_match = re.search(r"Proton\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)", text, re.IGNORECASE)
+    if prot_match:
+        try:
+            res.proton_prob = [int(prot_match.group(1)), int(prot_match.group(2)), int(prot_match.group(3))]
+        except ValueError:
+            res.proton_prob = [1, 1, 1]
+
+    # 7. Extract forecaster rationale/synopsis snippet
+    rationale_match = re.search(r"Rationale:\s*([^\n\r]+(?:\n[^\n\r]+){1,3})", text, re.IGNORECASE)
+    if rationale_match:
+        res.synopsis = " ".join(rationale_match.group(1).split())
+
+    return res
+
+
+def parse_noaa_27day_outlook(text: str, current_sfi: float = 145.0) -> SpaceWeather27DayOutlook:
+    """Parses NOAA SWPC 27-Day Outlook text product into daily projections and trend highlights."""
+    res = SpaceWeather27DayOutlook()
+    if not text:
+        return res
+
+    projections = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith(":"):
+            continue
+        # Expected formats:
+        # 2026-08-18   150    8    3
+        # 2026 Aug 18   150    8    3
+        parts = line.split()
+        if len(parts) >= 3:
+            try:
+                # Format: YYYY-MM-DD SFI Ap
+                if "-" in parts[0] and len(parts[0]) == 10:
+                    date_str = parts[0]
+                    sfi_val = float(parts[1])
+                    ap_val = int(parts[2])
+                    projections.append((date_str, sfi_val, ap_val))
+                # Format: YYYY Mon DD SFI Ap
+                elif len(parts) >= 5 and parts[0].isdigit() and len(parts[0]) == 4:
+                    date_str = f"{parts[1]} {parts[2]}"
+                    sfi_val = float(parts[3])
+                    ap_val = int(parts[4])
+                    projections.append((date_str, sfi_val, ap_val))
+            except (ValueError, IndexError):
+                continue
+
+    if projections:
+        res.daily_projections = projections
+        first_7 = projections[:7]
+        res.sfi_7day_avg = round(sum(p[1] for p in first_7) / len(first_7), 1)
+
+        # Peak SFI window
+        max_sfi = max(p[1] for p in projections)
+        peak_dates = [p[0] for p in projections if p[1] >= max_sfi - 5.0]
+        if peak_dates:
+            res.sfi_peak_window = f"{peak_dates[0]} - {peak_dates[-1]} (Peak SFI ~{max_sfi:.0f})"
+        else:
+            res.sfi_peak_window = f"Peak SFI ~{max_sfi:.0f}"
+
+        # Recurrent Storm window (max Ap)
+        max_ap = max(p[2] for p in projections)
+        storm_dates = [p[0] for p in projections if p[2] >= max(15, max_ap - 5)]
+        if storm_dates and max_ap >= 15:
+            res.recurrent_storm_window = f"{storm_dates[0]} - {storm_dates[-1]} (Ap ~{max_ap}, Unsettled/Storm)"
+        else:
+            res.recurrent_storm_window = "Geomagnetic conditions largely quiet to unsettled (Ap < 15)"
+
     return res
 
 
@@ -1312,10 +1571,13 @@ def is_self_spot(spotter_call: str, activator_call: str) -> bool:
 def extract_state_from_location(loc_desc: str) -> str:
     if not loc_desc:
         return ""
-    parts = loc_desc.split("-")
-    if len(parts) >= 2 and parts[0] == "US":
-        return parts[1].upper()
-    return loc_desc.upper()
+    first_loc = loc_desc.split(",")[0].strip().upper()
+    parts = first_loc.split("-")
+    if len(parts) >= 2 and parts[0] in ("US", "K"):
+        return parts[1]
+    if len(parts) >= 2 and parts[0] in ("CA", "VE"):
+        return parts[1]
+    return first_loc
 
 
 def build_regional_path_matrix(
@@ -1333,9 +1595,12 @@ def build_regional_path_matrix(
     )
     
     for spot in spots:
-        tgt_state = extract_state_from_location(getattr(spot, "location_desc", ""))
+        loc_desc = getattr(spot, "location_desc", "") or ""
+        tgt_state = extract_state_from_location(loc_desc)
         band = getattr(spot, "band", "")
         mode = getattr(spot, "mode", "")
+        ref = getattr(spot, "reference", "") or ""
+        tgt_country = ref.split("-")[0].upper() if "-" in ref else (loc_desc.split("-")[0].upper() if "-" in loc_desc else "")
         
         if not tgt_state or not band:
             continue
@@ -1356,8 +1621,11 @@ def build_regional_path_matrix(
             
             loc = resolver.resolve(spt, home_lat=home_lat, home_lon=home_lon, op_context=op_context)
             if loc.is_local_area and loc.distance_miles is not None:
-                key = (band.upper(), tgt_state)
-                matrix.openings.setdefault(key, []).append((loc.distance_miles, mode.upper(), None, False))
+                key_state = (band.upper(), tgt_state)
+                matrix.openings.setdefault(key_state, []).append((loc.distance_miles, mode.upper(), None, False))
+                if tgt_country and tgt_country != tgt_state:
+                    key_country = (band.upper(), tgt_country)
+                    matrix.openings.setdefault(key_country, []).append((loc.distance_miles, mode.upper(), None, False))
                 
     return matrix
 
@@ -1848,8 +2116,17 @@ def calculate_antenna_elevation_gain(
         desc = f"Mag Loop ({gain:+.1f} dBi @ {elev:.1f}°)"
 
     elif ant_key == "RUBBER_DUCK":
-        # Handheld HT whip on HF: extreme loss
-        gain = -22.0 if freq_mhz <= 30.0 else -12.0
+        # Handheld HT whip on HF: extreme loss due to severe shortening (<0.02 wavelength)
+        if freq_mhz <= 4.0:
+            gain = -38.0
+        elif freq_mhz <= 8.0:
+            gain = -34.0
+        elif freq_mhz <= 15.0:
+            gain = -30.0
+        elif freq_mhz <= 30.0:
+            gain = -26.0
+        else:
+            gain = -16.0  # 6m
         desc = f"Rubber Duck ({gain:+.1f} dBi @ {elev:.1f}°)"
 
     elif ant_key == "VHF_COLLINEAR":
@@ -2226,8 +2503,8 @@ def calculate_qso_probability(
             best_snrs = [o[2] for o in openings if o[2] is not None]
             
             # Determine if the opening was created by a weak signal mode
-            weak_modes = {"FT8", "FT4", "JS8", "WSPR", "CW", "JT65"}
-            opened_by_weak = all(m in weak_modes for m in best_modes)
+            weak_modes = {"FT8", "FT4", "JS8", "WSPR", "CW", "JT65", "PSK", "PSK31", "PSK63", "RTTY", "VARAC", "OTHER DIGITAL", "DIGITAL", "DATA"}
+            opened_by_weak = all((m in weak_modes or str(m).upper().startswith("PSK")) for m in best_modes)
             target_is_voice = clean_mode in {"SSB", "FM", "AM"}
             
             target_is_cw = clean_mode == "CW"
@@ -2308,7 +2585,7 @@ def calculate_qso_probability(
             prob = 0
             summary = f"Beyond VHF Horizon ({int(dist_miles)} mi > 100 mi limit)"
 
-        if clean_mode in ("FT8", "FT4", "DIGITAL") and prob > 0:
+        if (clean_mode in ("FT8", "FT4", "JS8", "PSK", "DIGITAL", "OTHER DIGITAL", "DATA") or clean_mode.startswith("PSK")) and prob > 0:
             prob = min(98, prob + 12)
         elif clean_mode == "CW" and prob > 0:
             prob = min(95, prob + 6)
@@ -2579,15 +2856,27 @@ def calculate_qso_probability(
     f_a = 10.0 * math.log10(10.0 ** (f_man / 10.0) + 10.0 ** (f_gal / 10.0) + 10.0 ** (f_atm_total / 10.0))
 
     # Receiver Bandwidth (Hz) per mode
-    if clean_mode in ("FT8", "FT4", "JS8", "DIGITAL"):
+    if clean_mode in ("FT8", "JS8"):
         bw_hz = 50.0
         snr_req_db = -21.0
+    elif clean_mode == "FT4":
+        bw_hz = 90.0
+        snr_req_db = -17.0
     elif clean_mode == "CW":
+        bw_hz = 500.0
+        snr_req_db = -10.0
+    elif clean_mode == "PSK" or clean_mode.startswith("PSK"):
+        bw_hz = 50.0
+        snr_req_db = -8.0
+    elif clean_mode in ("OTHER DIGITAL", "DIGITAL", "DATA", "RTTY", "VARAC", "VARA", "OLIVIA", "CONTESTIA", "THOR", "MFSK", "WSPR", "JT65", "Q65", "MSK144", "DMR", "C4FM", "DSTAR", "FREEDV", "SSTV"):
         bw_hz = 500.0
         snr_req_db = -10.0
     elif clean_mode in ("SSB", "PHONE"):
         bw_hz = 2400.0
         snr_req_db = 4.0
+    elif clean_mode == "FM":
+        bw_hz = 12000.0
+        snr_req_db = 10.0
     elif clean_mode == "AM":
         bw_hz = 6000.0
         snr_req_db = 16.0

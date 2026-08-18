@@ -13,6 +13,9 @@ It compares your hunted parks export against active spots on [pota.app](https://
   - **Multi-Layer Ionospheric Profile (E, F1, F2)**: Computes Chapman solar-zenith electron density for E/F1 layers and diurnal variation for the F2 layer ($foE, hmE, foF1, hmF1, foF2, hmF2, ymF2$).
   - **Multi-Hop Ray Tracing ($1E, 2E, 1F2, 2F2, 3F2, 4F2$)**: Calculates takeoff launch elevation angles ($\Delta$) and ionospheric incidence angles ($\phi_{\text{inc}}$) across Great-Circle paths to identify the dominant ray path mode.
   - **Skip-Zone Calculations**: Evaluates oblique critical frequency ($f \le foF2 \sec \phi_{\text{inc}}$). If an operating frequency exceeds the oblique MUF on short skip or nighttime paths, the path is flagged as closed.
+  - **Comprehensive Mode Support & Sub-Noise Decoding**: Full bandwidth and SNR threshold modeling for **CW (-10 dB), SSB (+4 dB), FT8 (-21 dB), FT4 (-17 dB), JS8 (-21 dB), PSK (-8 dB), FM (+10 dB), AM (+16 dB), and Other Digital (-10 dB)** (VarAC, VARA, Olivia, RTTY, etc.).
+  - **Official POTA ISO Country Naming & Location Formatting**: Integrates the complete UN ISO 3166-1/2 entity database across 249 global POTA programs, providing clean table display (US/CA state abbreviations, clean country names) and detailed mouseover tooltips.
+  - **NOAA SWPC D-RAP Absorption Model**: Real-time integration of NOAA D-Region Absorption Predictions to model daytime solar X-ray attenuation.
   - **Global DXCC & Region Mapping**: Automatically resolves international DXCC entities (US, Canada, Europe, Oceania, etc.) using local prefix and geolocation context for realistic global verification bonuses.
   - **Regional Lightning & Convective Threat Engine**: Hybrid architecture combining instant **NOAA NWS Convective Alerts** (Severe Thunderstorm, Tornado, Marine, Flash Flood warnings with active popup alerts) with real-time **Blitzortung.org** live WebSocket stroke telemetry across a 750-mile radius. Features **Storm Cell Trajectory Tracking** deriving ground speed (mph), cardinal movement direction, and **Time of Arrival (TOA in minutes)** estimates for approaching storms. Features a 1-to-10 threat scale, station safety advisories (Level 9/10 feedline disconnect alerts), and frequency-dependent noise surge ($\Delta F_{\text{QRN}}$) modeling.
   - **Open-Meteo Local Weather & 12-Hour Hourly Forecast**: Top dashboard card displaying current temperature and weather condition icon (`72°F ⛅`). Mouseover popup opens a 12-hour hourly forecast table with **Time (UTC)** in 24-hour format, temperature (°F), weather condition icons/descriptions, wind vectors, and Open-Meteo attribution.
@@ -25,15 +28,22 @@ It compares your hunted parks export against active spots on [pota.app](https://
     - **Mode Penalty Logic**: Evaluates the Signal-to-Noise Ratio (SNR) of live FT8/FT4 decodes to estimate cross-mode viability. Exceptionally strong digital decodes (e.g. >= 0dB) provide massive empirical boosts (+15 points) for SSB targets, while weak decodes are scaled appropriately for CW or ignored for SSB to maintain realistic expectations.
     - **Grayline Enhancement**: Applies path adjustments when either endpoint or the path midpoint aligns with the solar terminator.
     - VHF/UHF Line-of-Sight & 6m Es Modeling: Bounds 2m/70cm to tropospheric line-of-sight range (~150 km max) and detects summer Sporadic-E skip paths for 6m.
+- **Real-time Propagation Summary**:
+  - **Comprehensive Narrative Dispatch**: Synthesizes all real-time space weather (SFI, SSN, Kp, solar wind), D-RAP solar flare absorption, NOAA SWPC auroral oval boundaries, meteor shower scatter bursts, Blitzortung lightning QRN, local weather, and active POTA spot distributions into an objective, technical Area Forecast Discussion (AFD) narrative.
+  - **3-Day Space Weather Forecast & 27-Day Outlook**: Features NOAA SWPC numerical and narrative projections for 10.7cm Solar Flux, Planetary A-Index ($A_p$), peak Kp storm scales ($G0$–$G5$), M/X-class flare probabilities, and 27-day solar cycle peak DX windows.
+  - **Global 3-Day Thunderstorm Outlook & Seasonal QRN Climatology**: Features global numerical convective modeling (Precipitation %, Thunderstorm probability %, CAPE in $\text{J/kg}$, and static crash severity) and NASA LIS/OTD seasonal lightning transitions.
+  - Accessible directly via the **"Propagation Summary"** button on the bottom action bar, with one-click clipboard copying.
 - **Hybrid Live Propagation & Weather Map**:
   - Visually maps your real-time 100W link budget and QSO probabilities globally across the earth's surface using mathematically modeled 1x2 degree Maidenhead grid squares.
   - Generates smooth color gradients (Red -> Orange -> Yellow -> Green) mapped directly to your physics engine probabilities.
   - Features **Propagation Skip Diagrams**: Displays dashed red lines for paths mathematically closed due to skip-zone penetration, and solid green lines for groundwave paths or paths forced open by live empirical network telemetry.
   - **Live Doppler Weather Radar**: Integrated RainViewer precipitation reflectivity layer automatically fetching updated sweeps every 5 minutes.
+  - **Show Aurora Oval**: Integrates NOAA SWPC OVATION model to render real-time Northern (Aurora Borealis) and Southern (Aurora Australis) auroral boundaries with bold dark green core belts and dashed equatorward viewlines (updated on a 15-minute background cadence).
+  - **Decoupled Opacity Control**: Opacity slider adjusts the propagation heatmap without dimming Grayline or Aurora vector lines.
   - **Show Lightning Clusters**: Live Blitzortung thunderstorm cluster markers (`⚡` / `⚡➤` with directional motion vectors) displaying real-time cluster strike counts, storm ground speed, movement heading, and NWS convective alert headlines.
   - **Hybrid Architecture**: Uses native Qt6 `QWebEngineView` on standard Linux and Windows desktops, and automatically runs a lightweight, secure local HTTP server (`map_server.py`) on Chromebooks (ChromeOS / Crostini) to render in ChromeOS Chrome with full hardware GPU acceleration.
   - Dedicated **"Live Propagation & Weather Map"** button on the main toolbar for single-click map launching.
-  - Automatically recalculates and forces a UI refresh every 15 minutes as Grayline terminator geometry and Space Weather conditions drift.
+  - Automatically recalculates on a strict 10-minute cycle with filter state tracking independent of table filters.
   - Fully interactive Leaflet.js map with opacity sliders, filter controls, and native Full-Screen capability (F11 / Esc) for multi-monitor viewing.
 - **Preferences & Startup Modes (`Ctrl+P`)**:
   - **Startup Mode Selection**: Set your preferred startup mode—**At Home** (using your callsign's home QTH) or **Start in P2P Mode**.
@@ -44,9 +54,9 @@ It compares your hunted parks export against active spots on [pota.app](https://
   - **Status Filter**: View *All*, *New*, *Hunted*, *Worked*, or *P2P*.
   - **QSO Score Filter**: Filter by *All (0+)*, *>= 25 (Possible)*, *>= 50 (Good)*, *>= 75 (High)*, or *>= 99 (Exceptional)*.
   - **Band Filter**: Filter by 160m, 80m, 60m, 40m, 30m, 20m, 17m, 15m, 12m, 10m, 6m, 2m, 70cm, etc.
-  - **Mode Filter**: Filter by CW, SSB, FT8, FT4, FM, AM, Digital, etc.
+  - **Mode Filter**: Filter by CW, SSB, FT8, FT4, JS8, PSK, FM, AM, Other Digital.
   - **Instant Search**: Real-time search across Park ID, Park Name, Activator Callsign, Location/State, Grid, or Spotter Comments.
-- **Summary Metric Cards**: Live counters for Unhunted Spots, Hunted Spots, Total Spots, Unique Active Parks, Total Parks in Log, Live NOAA Space Weather (SFI / K-Index), Regional Lightning Activity (1–10 Threat Scale), and Receiver Band Noise Floor (S-units).
+- **Summary Metric Cards**: Live counters for Unhunted Spots, Hunted Spots, Total Spots, Unique Active Parks, Total Parks in Log, Live NOAA Space Weather (SFI / K-Index with rich 3-day forecast breakdown tooltip), Regional Lightning Activity (1–10 Threat Scale), and Receiver Band Noise Floor (S-units).
 - **Interactive Table & Resizable Columns**:
   - **13 Detailed Columns**: Status, `Score`, Activator, Frequency, Time, Park ID, Park Name, Location/State, Band, Mode, Distance & Bearing, Grid, Comments.
   - **Local Verification (`+` Symbol)**: Scores featuring a `+` (e.g. `85+`) indicate local spotter verification confirming nearby spotters in your region hear the signal.
@@ -125,7 +135,15 @@ python3 -m unittest test_web.py test_pota_prop.py
 ## Author & Acknowledgements
 
 - **Designed & Tested by:** Kevin McGrath (**W7KMC**) for the Amateur Radio and Parks on the Air (POTA) community.
-- **Data & Service Acknowledgements:** [pota.app](https://pota.app), [Blitzortung.org](https://www.blitzortung.org) Community Lightning Network, [Open-Meteo.com](https://open-meteo.com/) Weather API, NOAA Space Weather Prediction Center (SWPC).
+- **Data & Service Acknowledgements:**
+  - **Parks on the Air (POTA)** - The core spot stream and official park database ([parksontheair.com](https://parksontheair.com))
+  - **Blitzortung.org** - Real-time crowd-sourced lightning telemetry ([blitzortung.org](https://www.blitzortung.org))
+  - **[PSKReporter.info](https://pskreporter.info)** & **[Reverse Beacon Network (RBN)](https://reversebeacon.net)**: For real-time crowdsourced RF reception and empirical propagation verification.
+  - **[Open-Meteo](https://open-meteo.com)**: For free, high-resolution global weather forecasts without API key restrictions.
+  - **[NOAA Space Weather Prediction Center (SWPC)](https://www.swpc.noaa.gov)**: For live solar flux, geomagnetic index, D-RAP absorption, and OVATION Aurora model data.
+  - **[International Meteor Organization (IMO)](https://www.imo.net)**: For meteor shower calendar and real-time flux activity.
+  - **[RainViewer](https://www.rainviewer.com)** & **[IEM / NOAA Nexrad](https://mesonet.agron.iastate.edu/)**: For Doppler weather radar tile layers.
+  - **Carto & OpenStreetMap** - Map rendering and basemap tiles ([openstreetmap.org](https://openstreetmap.org))
 
 ---
 

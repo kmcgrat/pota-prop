@@ -115,6 +115,10 @@
 
         // Add light layer by default (dark mode is unchecked by default)
         lightLayer.addTo(map);
+
+        // Dedicated pane for propagation heatmap so opacity slider never dims aurora or vector lines
+        map.createPane('heatmapPane');
+        map.getPane('heatmapPane').style.zIndex = 350;
         
         // Add home marker
         L.marker([lat, lon], {
@@ -166,7 +170,7 @@
                             '<div id="controls-content">' +
                             '<b>Band</b>' +
                             '<select id="band-select" style="margin-top: 3px; margin-bottom: 8px; width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px;" onchange="window.updateFilters()">' +
-                            '<option value="All">All Spots (No Heatmap)</option>' +
+                            '<option value="All">All</option>' +
                             '<option value="160m">160m</option>' +
                             '<option value="80m">80m</option>' +
                             '<option value="60m">60m</option>' +
@@ -178,19 +182,29 @@
                             '<option value="12m">12m</option>' +
                             '<option value="10m">10m</option>' +
                             '<option value="6m">6m</option>' +
+                            '<option value="2m">2m</option>' +
+                            '<option value="70cm">70cm</option>' +
+                            '<option value="Other">Other</option>' +
                             '</select>' +
                             '<b>Mode</b><br>' +
                             '<select id="mode-select" style="margin-top: 3px; margin-bottom: 8px; width: 100%; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px;" onchange="window.updateFilters()">' +
-                            '<option value="SSB" selected>SSB (Voice)</option>' +
-                            '<option value="CW">CW (Morse)</option>' +
-                            '<option value="FT8">FT8 (Digital)</option>' +
-                            '<option value="FT4">FT4 (Digital)</option>' +
+                            '<option value="All">All</option>' +
+                            '<option value="CW">CW</option>' +
+                            '<option value="SSB" selected>SSB</option>' +
+                            '<option value="FT8">FT8</option>' +
+                            '<option value="FT4">FT4</option>' +
+                            '<option value="JS8">JS8</option>' +
+                            '<option value="PSK">PSK</option>' +
+                            '<option value="FM">FM</option>' +
+                            '<option value="AM">AM</option>' +
+                            '<option value="Other Digital">Other Digital</option>' +
                             '</select>' +
                             '<div style="margin-top: 6px;"><b>Heatmap Opacity</b></div>' +
                             '<input type="range" id="opacity-slider" min="0" max="1" step="0.1" value="0.8" style="width: 100%;" oninput="window.changeOpacity(this.value)">' +
                             '<div style="margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px;">' +
                             '<label><input type="checkbox" id="darkmap-check" onchange="window.toggleDarkMode()"> Dark Map Mode</label><br>' +
                             '<label><input type="checkbox" id="grayline-check" onchange="window.toggleGrayline()"> Show Grayline</label><br>' +
+                            '<label><input type="checkbox" id="aurora-check" onchange="window.toggleAurora()"> Show Aurora Oval</label><br>' +
                             '<label><input type="checkbox" id="lightning-check" onchange="window.updateLightningVisibility()"> Show Lightning Clusters</label>' +
                             '</div>' +
                             '<div style="margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px;">' +
@@ -304,10 +318,12 @@
     };
 
     window.changeOpacity = function(val) {
-        var renderers = document.querySelectorAll('.leaflet-overlay-pane svg, .leaflet-overlay-pane canvas');
-        renderers.forEach(function(el) {
-            el.style.opacity = val;
-        });
+        if (map) {
+            var pane = map.getPane('heatmapPane');
+            if (pane) {
+                pane.style.opacity = val;
+            }
+        }
     };
     
     window.toggleDarkMode = function() {
@@ -466,15 +482,20 @@
     window.setFilterState = function(band, mode) {
         var selectBand = document.getElementById('band-select');
         var selectMode = document.getElementById('mode-select');
+        var changed = false;
         if (selectBand && band && selectBand.value !== band) {
             selectBand.value = band;
             currentBand = band;
+            changed = true;
         }
         if (selectMode && mode && selectMode.value !== mode) {
             selectMode.value = mode;
             currentMode = mode;
+            changed = true;
         }
-        renderSpots();
+        if (changed) {
+            renderSpots();
+        }
     };
 
     window.toggleGrayline = function() {
@@ -518,6 +539,50 @@
         }
     };
 
+    var auroraLines = [];
+    var lastAuroraStr = "";
+
+    window.toggleAurora = function() {
+        var isChecked = document.getElementById('aurora-check') ? document.getElementById('aurora-check').checked : false;
+        if (isChecked) {
+            auroraLines.forEach(function(l) { if (map) l.addTo(map); });
+        } else {
+            auroraLines.forEach(function(l) { if (map) map.removeLayer(l); });
+        }
+    };
+
+    window.updateAurora = function(lines_data) {
+        auroraLines.forEach(function(l) { if (map) map.removeLayer(l); });
+        auroraLines = [];
+        
+        var isChecked = document.getElementById('aurora-check') ? document.getElementById('aurora-check').checked : false;
+        
+        var lines = (typeof lines_data === 'string') ? JSON.parse(lines_data) : lines_data;
+        if (lines && lines.length > 0) {
+            lines.forEach(function(lineObj) {
+                if (lineObj.coords && lineObj.coords.length > 0) {
+                    var offsets = [0, -360.0, 360.0, -720.0, 720.0];
+                    offsets.forEach(function(offset) {
+                        var isMulti = Array.isArray(lineObj.coords[0]) && Array.isArray(lineObj.coords[0][0]);
+                        var shiftedCoords = [];
+                        if (isMulti) {
+                            shiftedCoords = lineObj.coords.map(function(segment) {
+                                return segment.map(function(pt) { return [pt[0], pt[1] + offset]; });
+                            });
+                        } else {
+                            shiftedCoords = lineObj.coords.map(function(pt) { return [pt[0], pt[1] + offset]; });
+                        }
+                        var l = L.polyline(shiftedCoords, lineObj.style);
+                        if (isChecked && map) {
+                            l.addTo(map);
+                        }
+                        auroraLines.push(l);
+                    });
+                }
+            });
+        }
+    };
+
     function getScoreClass(score) {
         if (score >= 99) return 'score-exceptional';
         if (score >= 75) return 'score-high';
@@ -535,12 +600,33 @@
                     modeMatches = true;
                 } else {
                     var m = spot.mode.toUpperCase();
-                    if (currentMode === "SSB" && (m === "SSB" || m === "FM" || m === "AM")) modeMatches = true;
-                    else if (currentMode === "CW" && m === "CW") modeMatches = true;
-                    else if (currentMode === "FT8" && m === "FT8") modeMatches = true;
-                    else if (currentMode === "FT4" && m === "FT4") modeMatches = true;
-                    else if (currentMode === "DATA" && (m !== "SSB" && m !== "FM" && m !== "AM" && m !== "CW" && m !== "FT8" && m !== "FT4")) modeMatches = true;
-                    else if (currentMode === "ALL") modeMatches = true;
+                    var cm = currentMode ? currentMode.toUpperCase() : "ALL";
+                    if (cm === "ALL" || cm === "ALL MODES") {
+                        modeMatches = true;
+                    } else if (cm === "CW" && m === "CW") {
+                        modeMatches = true;
+                    } else if (cm === "SSB" && (m === "SSB" || m === "USB" || m === "LSB" || m === "PHONE")) {
+                        modeMatches = true;
+                    } else if (cm === "FT8" && m === "FT8") {
+                        modeMatches = true;
+                    } else if (cm === "FT4" && m === "FT4") {
+                        modeMatches = true;
+                    } else if (cm === "JS8" && (m === "JS8" || m === "JS8CALL")) {
+                        modeMatches = true;
+                    } else if (cm === "PSK" && (m === "PSK" || m.indexOf("PSK") === 0)) {
+                        modeMatches = true;
+                    } else if (cm === "FM" && m === "FM") {
+                        modeMatches = true;
+                    } else if (cm === "AM" && m === "AM") {
+                        modeMatches = true;
+                    } else if (cm === "OTHER DIGITAL" || cm === "DIGITAL" || cm === "DATA") {
+                        var standardNonOther = ["CW", "SSB", "USB", "LSB", "PHONE", "FT8", "FT4", "JS8", "JS8CALL", "FM", "AM"];
+                        if (standardNonOther.indexOf(m) === -1 && m.indexOf("PSK") !== 0) {
+                            modeMatches = true;
+                        }
+                    } else if (m === cm) {
+                        modeMatches = true;
+                    }
                 }
                 
                 if (!modeMatches) {
@@ -631,6 +717,7 @@
                     offsets.forEach(function(offset) {
                         var bounds = [[lat, lon + offset], [lat + 1.0, lon + offset + 2.0]];
                         var rect = L.rectangle(bounds, {
+                            pane: 'heatmapPane',
                             color: color,
                             weight: 0,
                             fillColor: color,
@@ -703,6 +790,10 @@
                         if (!map && data.home_lat !== undefined && data.home_lon !== undefined) {
                             initMap(data.home_lat, data.home_lon);
                         }
+                        if (data.band && data.mode && !window._initialFilterSet) {
+                            window._initialFilterSet = true;
+                            window.setFilterState(data.band, data.mode);
+                        }
                         if (data.spots !== undefined) {
                             var sStr = JSON.stringify(data.spots);
                             if (sStr !== lastSpotsStr) {
@@ -729,6 +820,13 @@
                             if (gStr !== lastGraylineStr) {
                                 lastGraylineStr = gStr;
                                 window.updateGrayline(data.grayline);
+                            }
+                        }
+                        if (data.aurora !== undefined) {
+                            var aStr = JSON.stringify(data.aurora);
+                            if (aStr !== lastAuroraStr) {
+                                lastAuroraStr = aStr;
+                                window.updateAurora(data.aurora);
                             }
                         }
                         if (data.lightning !== undefined) {

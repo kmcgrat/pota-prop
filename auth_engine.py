@@ -6,7 +6,7 @@ import os
 import secrets
 import time
 import urllib.parse
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, Tuple
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal, QUrl, QSettings, Qt, pyqtSlot
@@ -171,6 +171,7 @@ class POTAAuthenticator(QObject):
         self._refresh_token = self.settings.value("refresh_token", "")
         self._access_token = self.settings.value("access_token", "")
         self._token_expiry = self.settings.value("token_expiry", 0, type=float)
+        self._callsign = self.settings.value("callsign", "")
         
         self._code_verifier = ""
         self.browser = None
@@ -178,7 +179,32 @@ class POTAAuthenticator(QObject):
     def is_logged_in(self) -> bool:
         return bool(self._id_token)
 
-    def get_username(self) -> str:
+    def fetch_user_profile(self, id_token: Optional[str] = None) -> Dict[str, Any]:
+        """Fetches the authenticated user profile from POTA API to extract operator callsign."""
+        token = id_token or self.get_valid_token()
+        if not token:
+            return {}
+        try:
+            resp = requests.get(
+                "https://api.pota.app/user/profile",
+                headers={"Authorization": token, "Accept": "application/json"},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                callsign = data.get("callsign") or data.get("operator") or data.get("user") or ""
+                if callsign:
+                    self._callsign = str(callsign).strip().upper()
+                    self.settings.setValue("callsign", self._callsign)
+                return data
+        except Exception as e:
+            logger.debug(f"Failed to fetch POTA user profile: {e}")
+        return {}
+
+    def get_callsign(self) -> str:
+        """Extracts the operator callsign from stored profile or ID token claims."""
+        if self._callsign:
+            return self._callsign
         if not self._id_token:
             return ""
         try:
@@ -187,7 +213,29 @@ class POTAAuthenticator(QObject):
                 payload = parts[1]
                 payload += '=' * (-len(payload) % 4)
                 data = json.loads(base64.urlsafe_b64decode(payload).decode('utf-8'))
-                return data.get("pota:callsign", data.get("pota:fullname", data.get("email", data.get("cognito:username", ""))))
+                for key in ("custom:callsign", "pota:callsign", "preferred_username", "cognito:username", "name"):
+                    val = data.get(key, "")
+                    if val and "@" not in str(val):
+                        self._callsign = str(val).strip().upper()
+                        self.settings.setValue("callsign", self._callsign)
+                        return self._callsign
+        except Exception:
+            pass
+        return self._callsign or ""
+
+    def get_username(self) -> str:
+        call = self.get_callsign()
+        if call:
+            return call
+        if not self._id_token:
+            return ""
+        try:
+            parts = self._id_token.split('.')
+            if len(parts) >= 2:
+                payload = parts[1]
+                payload += '=' * (-len(payload) % 4)
+                data = json.loads(base64.urlsafe_b64decode(payload).decode('utf-8'))
+                return data.get("pota:fullname", data.get("email", data.get("cognito:username", "")))
         except Exception:
             pass
         return ""
@@ -239,6 +287,8 @@ class POTAAuthenticator(QObject):
                 resp.raise_for_status()
                 tokens = resp.json()
                 self._save_tokens(tokens)
+                # Fetch profile to extract callsign from POTA API
+                self.fetch_user_profile(tokens.get("id_token"))
                 self.auth_state_changed.emit(True)
             except Exception as e:
                 logger.error(f"Failed to exchange auth code for tokens: {e}")
@@ -263,26 +313,19 @@ class POTAAuthenticator(QObject):
         self.settings.setValue("token_expiry", self._token_expiry)
 
     def logout(self):
-        """Clears stored tokens and emits logged out state."""
+        """Clears stored tokens and emits logged out state while keeping device trust cookies."""
         self._id_token = ""
         self._refresh_token = ""
         self._access_token = ""
         self._token_expiry = 0
+        self._callsign = ""
         
         self.settings.remove("id_token")
         self.settings.remove("refresh_token")
         self.settings.remove("access_token")
         self.settings.remove("token_expiry")
+        self.settings.remove("callsign")
         
-        # Clear the auth browser profile cookies and cache completely
-        try:
-            profile = get_auth_profile()
-            profile.cookieStore().deleteAllCookies()
-            profile.clearHttpCache()
-            profile.clearAllVisitedLinks()
-        except Exception as e:
-            logger.debug(f"Error clearing auth profile cookies: {e}")
-            
         if self.browser is not None:
             try:
                 self.browser.close()

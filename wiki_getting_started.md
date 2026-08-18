@@ -9,9 +9,14 @@ Welcome to **POTA Prop**! This guide will help you get the application up and ru
 Key features include:
 * **Live POTA Spot Synchronization**: Asynchronously fetches active spots, highlighting NEW (unhunted) parks versus already-worked references.
 * **HF/VHF Propagation & QSO Score Physics**: Models multi-layer ionospheric profiles (E, F1, F2), multi-hop ray tracing ($1E, 2E, 1F2, 2F2$, etc.), and skip-zone obliquity.
+* **Comprehensive Mode Support**: Full SNR modeling and decoding thresholds for **CW, SSB, FT8, FT4, JS8, PSK (31/63/125), FM, AM, and Other Digital modes** (VarAC, VARA, Olivia, RTTY, etc.), taking into account sub-noise digital decoding.
+* **Official POTA ISO Country Naming**: Integrates the complete UN ISO 3166-1/2 country database for accurate global park identification, clean table formatting (US/CA state abbreviations, clean country names), and rich tooltips.
+* **NOAA SWPC D-RAP Absorption**: Real-time integration with NOAA SWPC D-Region Absorption Predictions model for accurate daytime HF attenuation.
+* **Real-time Propagation Summary**: Synthesizes all live space weather (including NOAA SWPC 3-day forecast & 27-day solar cycle outlook), D-RAP absorption, aurora boundary dynamics, meteor showers, Blitzortung lightning QRN, global 3-day convective thunderstorm forecasts, seasonal lightning climatology, and live POTA spot distribution into an objective, technical Area Forecast Discussion (AFD) narrative.
 * **Hybrid Interactive Propagation & Weather Map**: 
-  * Displays global real-time 100W link budget heatmaps and propagation skip lines.
+  * Displays global real-time 100W link budget heatmaps and propagation skip lines, with map-independent filters and decoupled opacity control.
   * **Live Doppler Weather Radar**: Automatically polls and updates RainViewer precipitation reflectivity sweeps every 5 minutes.
+  * **Show Aurora Oval**: Renders NOAA SWPC OVATION model auroral boundaries with bold dark green core belts and dashed equatorward viewlines.
   * **Show Lightning Clusters**: Displays real-time Blitzortung thunderstorm cluster markers (`⚡` / `⚡➤` with directional motion vectors) and storm telemetry popups.
   * **Hybrid Architecture**: Uses native Qt6 `QWebEngineView` on standard Linux/Windows, and seamlessly serves via a secure, hardware-accelerated local HTTP map server on Chromebooks (ChromeOS / Crostini).
 * **Blitzortung Live Lightning Noise (QRN)**: Integrates real-time Blitzortung WebSocket stroke telemetry and NOAA NWS alerts with storm cell trajectories and estimated Time of Arrival (TOA).
@@ -147,20 +152,28 @@ Once the app is running:
 
 3. **Explore the Live Propagation & Weather Map**:
    * Click the **Live Propagation & Weather Map** button on the main toolbar.
+   * Filter bands and modes seamlessly synchronized with your table view.
+   * Toggle **Show Grayline** to see real-time day/night solar terminator lines.
+   * Toggle **Show Aurora Oval** to view real-time NOAA SWPC Northern (Borealis) and Southern (Australis) auroral boundaries with dark gray dashed equatorward viewlines and main auroral belts (updated on a 15-minute cadence).
    * Toggle **Show Lightning Clusters** to see real-time thunderstorm cells with directional motion headings.
    * Toggle **Doppler Weather Radar** for live RainViewer precipitation sweeps (automatically updating every 5 minutes).
 
 ---
 
+## Author & Project Credits
+
+* **Designed & Tested by**: Kevin McGrath (**W7KMC**) for the Amateur Radio and Parks on the Air (POTA) community.
+
 ## Data Sources & Credits
 
 POTA Prop heavily relies on the incredible work of the following open platforms and data sources. Please consider supporting them or contributing to their crowdsourced networks:
 
-* **Parks on the Air (POTA)** - The core spot stream and park database. ([parksontheair.com](https://parksontheair.com))
+* **Parks on the Air (POTA)** - The core spot stream and official park database. ([parksontheair.com](https://parksontheair.com))
 * **Blitzortung.org** - Real-time crowd-sourced lightning telemetry. ([blitzortung.org](https://www.blitzortung.org))
 * **RainViewer** - Live Doppler weather radar API. ([rainviewer.com](https://www.rainviewer.com))
+* **IEM / NOAA Nexrad** - Live US weather radar tiles. ([mesonet.agron.iastate.edu](https://mesonet.agron.iastate.edu/))
 * **PSKReporter & RBN** - Live reverse beacon network spotting. ([pskreporter.info](https://pskreporter.info))
 * **Open-Meteo** - Excellent free, open-source weather API. ([open-meteo.com](https://open-meteo.com))
-* **NOAA SWPC** - Space weather data (SFI, K-index, A-index). ([swpc.noaa.gov](https://www.swpc.noaa.gov))
-* **Carto & OpenStreetMap** - Map rendering and basemap tiles.
+* **NOAA SWPC** - Space weather data (SFI, K-index, A-index), D-RAP Absorption & OVATION Aurora Oval models. ([swpc.noaa.gov](https://www.swpc.noaa.gov))
+* **Carto & OpenStreetMap** - Map rendering and basemap tiles. ([openstreetmap.org](https://www.openstreetmap.org))
 

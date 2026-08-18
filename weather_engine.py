@@ -98,10 +98,29 @@ class CurrentWeatherItem:
 
 
 @dataclass
+class ConvectiveDayForecast:
+    """Represents convective storm and QRN static outlook for a single day."""
+    day_date: str
+    precip_prob_max: int
+    thunderstorm_prob: int
+    max_cape: float
+    weather_code: int
+    weather_desc: str
+    qrn_risk: str
+
+
+@dataclass
+class Convective3DayForecast:
+    """3-day convective thunderstorm and QRN forecast."""
+    days: List[ConvectiveDayForecast] = field(default_factory=list)
+
+
+@dataclass
 class WeatherForecastSummary:
-    """Complete summary containing current conditions and 12-hour hourly forecast."""
+    """Complete summary containing current conditions, 12-hour hourly forecast, and 3-day convective outlook."""
     current: Optional[CurrentWeatherItem] = None
     hourly_forecast: List[HourlyForecastItem] = field(default_factory=list)
+    convective_3day: Optional[Convective3DayForecast] = None
     home_lat: float = 0.0
     home_lon: float = 0.0
     location_name: Optional[str] = None
@@ -239,8 +258,9 @@ class WeatherEngine:
             "latitude": f"{lat:.4f}",
             "longitude": f"{lon:.4f}",
             "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m",
-            "hourly": "temperature_2m,relative_humidity_2m,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m",
-            "forecast_hours": "16",  # fetch slightly more to slice next 12 hours from current time
+            "hourly": "temperature_2m,relative_humidity_2m,precipitation_probability,weather_code,wind_speed_10m,wind_direction_10m,cape",
+            "daily": "weather_code,precipitation_probability_max",
+            "forecast_days": "3",
             "temperature_unit": "fahrenheit",
             "wind_speed_unit": "mph",
         }
@@ -318,10 +338,76 @@ class WeatherEngine:
                                         humidity_pct=int(hums[i]) if i < len(hums) else 0,
                                     )
                                 )
-                                if len(items) >= 12:
-                                    break
-
                         summary.hourly_forecast = items
+
+                    # Parse 3-Day Convective / Thunderstorm Forecast
+                    if "daily" in data:
+                        d_data = data["daily"]
+                        d_times = d_data.get("time", [])
+                        d_codes = d_data.get("weather_code", [])
+                        d_precips = d_data.get("precipitation_probability_max", [])
+
+                        # Calculate daily max CAPE from hourly if present
+                        h_capes = data.get("hourly", {}).get("cape", []) if "hourly" in data else []
+                        h_times = data.get("hourly", {}).get("time", []) if "hourly" in data else []
+
+                        conv_days: List[ConvectiveDayForecast] = []
+                        for di in range(min(3, len(d_times))):
+                            dt_str = d_times[di]
+                            wcode = int(d_codes[di]) if di < len(d_codes) else 0
+                            pprob = int(d_precips[di]) if di < len(d_precips) else 0
+                            wdesc, _, _ = get_wmo_info(wcode)
+
+                            # Find max CAPE for this day
+                            day_capes = [
+                                float(h_capes[hi])
+                                for hi in range(len(h_capes))
+                                if hi < len(h_times) and h_times[hi].startswith(dt_str) and h_capes[hi] is not None
+                            ]
+                            max_cape = max(day_capes) if day_capes else 0.0
+
+                            # Estimate thunderstorm probability based on WMO code, Precip %, and CAPE
+                            is_ts_code = wcode in (95, 96, 99)
+                            if is_ts_code:
+                                ts_prob = max(60, pprob)
+                            elif max_cape >= 2000:
+                                ts_prob = min(80, int(pprob * 0.9))
+                            elif max_cape >= 1000:
+                                ts_prob = min(60, int(pprob * 0.7))
+                            elif max_cape >= 500:
+                                ts_prob = min(40, int(pprob * 0.5))
+                            else:
+                                ts_prob = min(20, int(pprob * 0.2))
+
+                            # QRN impact rating
+                            if ts_prob >= 50 or is_ts_code or max_cape >= 1500:
+                                qrn_risk = "Elevated QRN risk (+10 to +18 dB static crash surges on 40m-160m)"
+                            elif ts_prob >= 25 or max_cape >= 600:
+                                qrn_risk = "Moderate QRN (occasional distant static crashes during peak heating)"
+                            else:
+                                qrn_risk = "Quiet baseline noise floor across all HF bands"
+
+                            # Format friendly date (e.g. "Aug 18")
+                            try:
+                                parsed_d = datetime.strptime(dt_str, "%Y-%m-%d")
+                                friendly_d = parsed_d.strftime("%b %d")
+                            except Exception:
+                                friendly_d = dt_str
+
+                            conv_days.append(
+                                ConvectiveDayForecast(
+                                    day_date=friendly_d,
+                                    precip_prob_max=pprob,
+                                    thunderstorm_prob=ts_prob,
+                                    max_cape=round(max_cape, 1),
+                                    weather_code=wcode,
+                                    weather_desc=wdesc,
+                                    qrn_risk=qrn_risk,
+                                )
+                            )
+
+                        if conv_days:
+                            summary.convective_3day = Convective3DayForecast(days=conv_days)
 
         except Exception as e:
             logger.warning(f"Failed to fetch Open-Meteo weather data: {e}")
@@ -350,3 +436,66 @@ def fetch_local_weather_summary(
         force_refresh=force_refresh,
         timeout=timeout,
     )
+
+
+def get_seasonal_qrn_climatology(lat: float, month: Optional[int] = None) -> str:
+    """
+    Computes global seasonal atmospheric noise (QRN) and lightning climatology
+    based on station latitude and current month.
+    """
+    if month is None:
+        month = datetime.now(timezone.utc).month
+
+    # Northern Hemisphere (> 20 deg N)
+    if lat >= 20.0:
+        if month in (8, 9):  # Late Summer -> Autumn
+            return (
+                "Northern temperate latitudes are transitioning from peak summer convection into autumn. "
+                "Regional lightning strike frequency drops by ~35-50% over the coming weeks, leading to a "
+                "steady reduction in baseline atmospheric crash noise on 80m and 160m."
+            )
+        elif month in (10, 11, 12, 1, 2):  # Late Autumn -> Winter
+            return (
+                "Northern winter low-QRN baseline prevailing. Cold, stable continental air suppresses regional "
+                "thunderstorm activity, delivering prime DX operating conditions and minimum receiver noise on 160m, 80m, and 40m."
+            )
+        elif month in (3, 4, 5):  # Spring
+            return (
+                "Northern spring convective ramp-up in progress. Increasing solar insolation and frontal activity "
+                "gradually elevate diurnal static noise and sporadic thunderstorm clusters across mid-latitudes."
+            )
+        else:  # June, July (Peak Summer)
+            return (
+                "Northern hemisphere mid-summer peak convective season. Intense solar heating drives diurnal "
+                "thunderstorm development; expect persistent elevated QRN (S5-S7) and frequent static crashes on 160m-40m until local midnight."
+            )
+
+    # Southern Hemisphere (< -20 deg S)
+    elif lat <= -20.0:
+        if month in (8, 9, 10):  # Late Winter -> Spring
+            return (
+                "Southern temperate latitudes are transitioning into spring. Solar heating is increasing convective "
+                "instability across South America, Southern Africa, and Australia, beginning a seasonal rise in lower-HF static noise."
+            )
+        elif month in (11, 12, 1, 2):  # Summer Peak
+            return (
+                "Southern hemisphere summer convective peak. Diurnal heating generates frequent thunderstorm clusters, "
+                "elevating 80m/160m noise floors during evening and nighttime operating hours."
+            )
+        elif month in (3, 4, 5):  # Autumn
+            return (
+                "Southern hemisphere autumn transition. Diurnal thunderstorm activity is diminishing, yielding "
+                "progressively quieter noise baselines and improving lower-HF DX conditions."
+            )
+        else:  # Winter (June, July)
+            return (
+                "Southern winter low-QRN window active. Stable atmospheric conditions minimize local lightning, "
+                "providing optimal receiver sensitivity on 40m, 80m, and 160m."
+            )
+
+    # Tropical / Equatorial Belt (-20 deg to +20 deg)
+    else:
+        return (
+            "Equatorial / Tropical maritime zone. Persistent Intertropical Convergence Zone (ITCZ) convection maintains "
+            "year-round elevated atmospheric noise levels (S5-S8) on 160m, 80m, and 40m, peaking during local late afternoon and dusk."
+        )

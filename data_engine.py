@@ -62,111 +62,407 @@ BAND_RANGES: List[Tuple[float, float, str]] = [
     (1240000.0, 1300000.0, "23cm"),
 ]
 
-POTA_PREFIX_TO_COUNTRY: Dict[str, str] = {
-    "US": "United States",
-    "K": "United States",
-    "KL": "Alaska",
-    "KL7": "Alaska",
-    "KH6": "Hawaii",
-    "KP4": "Puerto Rico",
-    "KP2": "US Virgin Islands",
-    "KH2": "Guam",
-    "VE": "Canada",
+POTA_PROGRAM_TO_COUNTRY: Dict[str, str] = {
+    "4O": "Montenegro",
+    "4X": "Israel",
+    "9A": "Croatia",
+    "9M": "Malaysia",
+    "AD": "Andorra",
+    "AE": "United Arab Emirates",
+    "AF": "Afghanistan",
+    "AG": "Antigua and Barbuda",
+    "AI": "Anguilla",
+    "AL": "Albania",
+    "AM": "Armenia",
+    "AO": "Angola",
+    "AQ": "Antarctica",
+    "AR": "Argentina",
+    "AS": "American Samoa",
+    "AT": "Austria",
+    "AU": "Australia",
+    "AW": "Aruba",
+    "AX": "\u00c5land Islands",
+    "AZ": "Azerbaijan",
+    "BA": "Bosnia and Herzegovina",
+    "BB": "Barbados",
+    "BD": "Bangladesh",
+    "BE": "Belgium",
+    "BF": "Burkina Faso",
+    "BG": "Bulgaria",
+    "BH": "Bahrain",
+    "BI": "Burundi",
+    "BJ": "Benin",
+    "BL": "Saint Barth\u00e9lemy",
+    "BM": "Bermuda",
+    "BN": "Brunei Darussalam",
+    "BO": "Bolivia",
+    "BQ": "Bonaire, Sint Eustatius and Saba",
+    "BR": "Brazil",
+    "BS": "Bahamas",
+    "BT": "Bhutan",
+    "BV": "Bouvet Island",
+    "BW": "Botswana",
+    "BY": "Belarus",
+    "BZ": "Belize",
     "CA": "Canada",
-    "VA": "Canada",
-    "VY": "Canada",
-    "VO": "Canada",
-    "VK": "Australia",
-    "ZL": "New Zealand",
-    "DL": "Germany",
+    "CC": "Cocos (Keeling) Islands",
+    "CD": "Democratic Republic of the Congo",
+    "CE": "Chile",
+    "CF": "Central African Republic",
+    "CG": "Congo",
+    "CH": "Switzerland",
+    "CI": "C\u00f4te d'Ivoire",
+    "CK": "Cook Islands",
+    "CL": "Chile",
+    "CM": "Cameroon",
+    "CN": "China",
+    "CO": "Colombia",
+    "CR": "Costa Rica",
+    "CT": "Portugal",
+    "CU": "Cuba",
+    "CV": "Cabo Verde",
+    "CW": "Cura\u00e7ao",
+    "CX": "Christmas Island",
+    "CY": "Cyprus",
+    "CZ": "Czechia",
     "DA": "Germany",
     "DB": "Germany",
+    "DE": "Germany",
     "DF": "Germany",
-    "DK": "Germany",
-    "G": "England",
-    "GX": "England",
-    "GM": "Scotland",
-    "GW": "Wales",
-    "GI": "Northern Ireland",
-    "GD": "Isle of Man",
-    "GJ": "Jersey",
-    "GU": "Guernsey",
-    "F": "France",
-    "I": "Italy",
-    "EA": "Spain",
-    "CT": "Portugal",
-    "JA": "Japan",
-    "JP": "Japan",
-    "HL": "South Korea",
-    "BV": "Taiwan",
-    "BY": "China",
+    "DJ": "Djibouti",
+    "DK": "Denmark",
+    "DL": "Germany",
+    "DM": "Dominica",
+    "DO": "Dominican Republic",
     "DU": "Philippines",
-    "HS": "Thailand",
-    "YB": "Indonesia",
-    "9M": "Malaysia",
-    "VU": "India",
-    "4X": "Israel",
-    "4Z": "Israel",
-    "ZS": "South Africa",
-    "PY": "Brazil",
-    "PP": "Brazil",
-    "LU": "Argentina",
-    "CE": "Chile",
-    "CX": "Uruguay",
-    "OA": "Peru",
-    "HK": "Colombia",
-    "YV": "Venezuela",
-    "XE": "Mexico",
-    "HP": "Panama",
-    "TI": "Costa Rica",
-    "TG": "Guatemala",
-    "TF": "Iceland",
-    "LA": "Norway",
-    "SM": "Sweden",
-    "OH": "Finland",
-    "OZ": "Denmark",
-    "OY": "Faroe Islands",
-    "OX": "Greenland",
-    "ES": "Estonia",
-    "YL": "Latvia",
-    "LY": "Lithuania",
-    "SP": "Poland",
-    "OK": "Czech Republic",
-    "OM": "Slovakia",
+    "DZ": "Algeria",
+    "E7": "Bosnia & Herzegovina",
+    "EA": "Spain",
+    "EC": "Ecuador",
+    "EE": "Estonia",
+    "EG": "Egypt",
+    "EH": "Western Sahara",
+    "EI": "Ireland",
+    "ER": "Eritrea",
+    "ES": "Spain",
+    "ET": "Ethiopia",
+    "F": "France",
+    "FI": "Finland",
+    "FJ": "Fiji",
+    "FK": "Falkland Islands (Malvinas)",
+    "FM": "Federated States of Micronesia",
+    "FO": "Faroe Islands",
+    "FR": "France",
+    "GA": "Gabon",
+    "GB": "United Kingdom",
+    "GD": "Grenada",
+    "GE": "Georgia",
+    "GF": "French Guiana",
+    "GG": "Guernsey",
+    "GH": "Ghana",
+    "GI": "Gibraltar",
+    "GL": "Greenland",
+    "GM": "Gambia",
+    "GN": "Guinea",
+    "GP": "Guadaloupe",
+    "GQ": "Equatorial Guinea",
+    "GR": "Greece",
+    "GS": "South Georgia and the South Sandwich Islands",
+    "GT": "Guatemala",
+    "GU": "Guam",
+    "GW": "Guinea-Bissau",
+    "GY": "Guyana",
     "HA": "Hungary",
-    "HG": "Hungary",
-    "OE": "Austria",
     "HB": "Switzerland",
-    "HB0": "Liechtenstein",
-    "ON": "Belgium",
-    "PA": "Netherlands",
-    "PI": "Netherlands",
-    "PB": "Netherlands",
-    "PD": "Netherlands",
-    "PE": "Netherlands",
-    "LX": "Luxembourg",
-    "YO": "Romania",
+    "HK": "Hong Kong",
+    "HL": "South Korea",
+    "HM": "Heard Island and McDonald Islands",
+    "HN": "Honduras",
+    "HP": "Panama",
+    "HR": "Croatia",
+    "HS": "Thailand",
+    "HT": "Haiti",
+    "HU": "Hungary",
+    "I": "Italy",
+    "ID": "Indonesia",
+    "IE": "Ireland",
+    "IL": "Israel",
+    "IM": "Isle of Man",
+    "IN": "India",
+    "IO": "British Indian Ocean Territory",
+    "IQ": "Iraq",
+    "IR": "Iran",
+    "IS": "Iceland",
+    "IT": "Italy",
+    "JA": "Japan",
+    "JE": "Jersey",
+    "JM": "Jamaica",
+    "JO": "Jordan",
+    "JP": "Japan",
+    "K": "United States",
+    "KE": "Kenya",
+    "KG": "Kyrgyzstan",
+    "KH": "Cambodia",
+    "KI": "Kiribati",
+    "KM": "Comoros",
+    "KN": "Saint Kitts and Nevis",
+    "KP": "Korea (Democratic People's Republic of)",
+    "KR": "South Korea",
+    "KW": "Kuwait",
+    "KY": "Cayman Islands",
+    "KZ": "Kazakhstan",
+    "LA": "Laos",
+    "LB": "Lebanon",
+    "LC": "Saint Lucia",
+    "LI": "Liechtenstein",
+    "LK": "Sri Lanka",
+    "LR": "Liberia",
+    "LS": "Lesotho",
+    "LT": "Lithuania",
+    "LU": "Luxembourg",
+    "LV": "Latvia",
+    "LY": "Libya",
     "LZ": "Bulgaria",
-    "SV": "Greece",
-    "TA": "Turkey",
+    "MA": "Morocco",
+    "MC": "Monaco",
+    "MD": "Moldova",
+    "ME": "Montenegro",
+    "MF": "Saint Martin",
+    "MG": "Madagascar",
+    "MH": "Marshall Islands",
+    "MK": "North Macedonia",
+    "ML": "Mali",
+    "MM": "Myanmar",
+    "MN": "Mongolia",
+    "MO": "Macao",
+    "MP": "Northern Mariana Islands",
+    "MQ": "Martinique",
+    "MR": "Mauritania",
+    "MS": "Montserrat",
+    "MT": "Malta",
+    "MU": "Mauritius",
+    "MV": "Maldives",
+    "MW": "Malawi",
+    "MX": "Mexico",
+    "MY": "Malaysia",
+    "MZ": "Mozambique",
+    "NA": "Namibia",
+    "NC": "New Caledonia",
+    "NE": "Niger",
+    "NF": "Norfolk Island",
+    "NG": "Nigeria",
+    "NI": "Nicaragua",
+    "NL": "Netherlands",
+    "NO": "Norway",
+    "NP": "Nepal",
+    "NR": "Nauru",
+    "NU": "Niue",
+    "NZ": "New Zealand",
+    "OA": "Peru",
+    "OE": "Austria",
+    "OH": "Finland",
+    "OK": "Czechia",
+    "OM": "Oman",
+    "ON": "Belgium",
+    "OZ": "Denmark",
+    "PA": "Panama",
+    "PE": "Peru",
+    "PF": "French Polynesia",
+    "PG": "Papua New Guinea",
+    "PH": "Philippines",
+    "PK": "Pakistan",
+    "PL": "Poland",
+    "PM": "Saint Pierre and Miquelon",
+    "PN": "Pitcairn Islands",
+    "PP": "Brazil",
+    "PR": "Puerto Rico",
+    "PS": "Palestine",
+    "PT": "Portugal",
+    "PW": "Palau",
+    "PY": "Paraguay",
+    "QA": "Qatar",
+    "RE": "R\u00e9union",
+    "RO": "Romania",
+    "RS": "Serbia",
+    "RU": "Russian Federation",
+    "RW": "Rwanda",
+    "S5": "Slovenia",
+    "SA": "Saudi Arabia",
+    "SB": "Solomon Islands",
+    "SC": "Seychelles",
+    "SD": "Sudan",
+    "SE": "Sweden",
+    "SG": "Singapore",
+    "SH": "Saint Helena, Ascension and Tristan da Cunha",
+    "SI": "Slovenia",
+    "SJ": "Svalbard and Jan Mayan",
+    "SK": "Slovakia",
+    "SL": "Sierra Leone",
+    "SM": "San Marino",
+    "SN": "Senegal",
+    "SO": "Somalia",
+    "SP": "Poland",
+    "SR": "Suriname",
+    "SS": "South Sudan",
+    "ST": "S\u00e3o Tom\u00e9 and Pr\u00edncipe",
+    "SV": "El Salvador",
+    "SX": "Sint Maarten",
+    "SY": "Syria",
+    "SZ": "Eswatini",
+    "TC": "Turks and Caicos Islands",
+    "TD": "Chad",
+    "TF": "French Southern Territories",
+    "TG": "Togo",
+    "TH": "Thailand",
+    "TI": "Costa Rica",
+    "TJ": "Tajikistan",
+    "TK": "Tokelau",
+    "TL": "Timor-Leste",
+    "TM": "Turkmenistan",
+    "TN": "Tunisia",
+    "TO": "Tonga",
+    "TR": "T\u00fcrkiye",
+    "TT": "Trinidad and Tobago",
+    "TV": "Tuvalu",
+    "TW": "Taiwan (Province of China)",
+    "TZ": "Tanzania",
+    "UA": "Ukraine",
+    "UG": "Uganda",
+    "UM": "United States Minor Outlying Islands",
+    "US": "United States",
+    "UY": "Uruguay",
+    "UZ": "Uzbekistan",
+    "VA": "Vatican",
+    "VC": "St. Vincent and the Grenadines",
+    "VE": "Venezuela",
+    "VG": "Virgin Islands (British)",
+    "VI": "Virgin Islands (US)",
+    "VK": "Australia",
+    "VN": "Viet Nam",
+    "VO": "Canada",
+    "VU": "Vanuatu",
+    "VY": "Canada",
+    "WF": "Wallis and Futuna",
+    "WS": "Samoa",
+    "XE": "Mexico",
+    "YB": "Indonesia",
+    "YE": "Yemen",
+    "YO": "Romania",
+    "YT": "Mayotte",
+    "YU": "Serbia",
+    "YV": "Venezuela",
+    "ZA": "South Africa",
+    "ZL": "New Zealand",
+    "ZM": "Zambia",
+    "ZS": "South Africa",
+    "ZW": "Zimbabwe",
+}
+
+# Legacy alias for backward compatibility
+POTA_PREFIX_TO_COUNTRY = POTA_PROGRAM_TO_COUNTRY
+
+ITU_CALLSIGN_TO_COUNTRY: Dict[str, str] = {
+    # North America
+    "AA": "United States", "AB": "United States", "AC": "United States", "AD": "United States",
+    "AE": "United States", "AF": "United States", "AG": "United States", "AI": "United States",
+    "AJ": "United States", "AK": "United States", "K": "United States", "N": "United States", "W": "United States",
+    "KL": "Alaska", "KL7": "Alaska", "AL7": "Alaska", "NL7": "Alaska", "WL7": "Alaska",
+    "KH6": "Hawaii", "AH6": "Hawaii", "NH6": "Hawaii", "WH6": "Hawaii",
+    "KP4": "Puerto Rico", "NP4": "Puerto Rico", "WP4": "Puerto Rico",
+    "KP2": "US Virgin Islands", "NP2": "US Virgin Islands", "WP2": "US Virgin Islands",
+    "KH2": "Guam", "AH2": "Guam", "NH2": "Guam", "WH2": "Guam",
+    "KH0": "Mariana Islands", "KH8": "American Samoa",
+    "CF": "Canada", "CG": "Canada", "CJ": "Canada", "CK": "Canada",
+    "CY": "Canada", "CZ": "Canada", "VA": "Canada", "VE": "Canada",
+    "VO": "Canada", "VY": "Canada", "XJ": "Canada", "XK": "Canada",
+    "XL": "Canada", "XM": "Canada", "XN": "Canada", "XO": "Canada",
+    "XE": "Mexico", "XF": "Mexico", "4A": "Mexico", "6D": "Mexico",
+    
+    # Europe
+    "EA": "Spain", "EB": "Spain", "EC": "Spain", "ED": "Spain", "EE": "Spain", "EF": "Spain", "EG": "Spain", "EH": "Spain", "AM": "Spain", "AN": "Spain", "AO": "Spain",
+    "EA6": "Balearic Islands", "EA8": "Canary Islands", "EA9": "Ceuta & Melilla",
+    "ES": "Estonia",
+    "DL": "Germany", "DA": "Germany", "DB": "Germany", "DC": "Germany", "DD": "Germany", "DF": "Germany", "DG": "Germany", "DH": "Germany", "DJ": "Germany", "DK": "Germany", "DM": "Germany", "DO": "Germany", "DP": "Germany", "DQ": "Germany", "DR": "Germany", "Y2": "Germany",
+    "G": "England", "GX": "England", "M": "England", "MX": "England", "2E": "England",
+    "GM": "Scotland", "GS": "Scotland", "MM": "Scotland", "2M": "Scotland",
+    "GW": "Wales", "GC": "Wales", "MW": "Wales", "2W": "Wales",
+    "GI": "Northern Ireland", "GN": "Northern Ireland", "MI": "Northern Ireland", "2I": "Northern Ireland",
+    "GD": "Isle of Man", "GT": "Isle of Man", "MD": "Isle of Man", "2D": "Isle of Man",
+    "GJ": "Jersey", "GH": "Jersey", "MJ": "Jersey", "2J": "Jersey",
+    "GU": "Guernsey", "GP": "Guernsey", "MU": "Guernsey", "2U": "Guernsey",
+    "EI": "Ireland", "EJ": "Ireland",
+    "F": "France", "TM": "France", "TP": "France", "TQ": "France", "TV": "France", "TX": "France",
+    "I": "Italy", "IA": "Italy", "IB": "Italy", "IC": "Italy", "ID": "Italy", "IE": "Italy", "IF": "Italy", "IG": "Italy", "IH": "Italy", "IK": "Italy", "IL": "Italy", "IM": "Italy", "IN": "Italy", "IO": "Italy", "IP": "Italy", "IQ": "Italy", "IR": "Italy", "IS": "Sardinia", "IT": "Italy", "IU": "Italy", "IV": "Italy", "IW": "Italy", "IX": "Italy", "IY": "Italy",
+    "CT": "Portugal", "CQ": "Portugal", "CR": "Portugal", "CS": "Portugal", "CU": "Azores", "CT3": "Madeira",
+    "HB": "Switzerland", "HE": "Switzerland", "HB0": "Liechtenstein",
+    "OE": "Austria",
+    "ON": "Belgium", "OO": "Belgium", "OP": "Belgium", "OQ": "Belgium", "OR": "Belgium", "OS": "Belgium", "OT": "Belgium",
+    "PA": "Netherlands", "PB": "Netherlands", "PC": "Netherlands", "PD": "Netherlands", "PE": "Netherlands", "PF": "Netherlands", "PG": "Netherlands", "PH": "Netherlands", "PI": "Netherlands",
+    "LX": "Luxembourg",
+    "OZ": "Denmark", "5P": "Denmark", "5Q": "Denmark", "OY": "Faroe Islands", "OX": "Greenland",
+    "LA": "Norway", "LB": "Norway", "LC": "Norway", "LD": "Norway", "LE": "Norway", "LF": "Norway", "LG": "Norway", "LH": "Norway", "LI": "Norway", "LJ": "Norway", "LN": "Norway", "JW": "Svalbard", "JX": "Jan Mayen",
+    "SM": "Sweden", "SA": "Sweden", "SB": "Sweden", "SC": "Sweden", "SD": "Sweden", "SE": "Sweden", "SF": "Sweden", "SG": "Sweden", "SH": "Sweden", "SI": "Sweden", "SJ": "Sweden", "SK": "Sweden", "SL": "Sweden", "7S": "Sweden", "8S": "Sweden",
+    "OH": "Finland", "OF": "Finland", "OG": "Finland", "OI": "Finland", "OH0": "Åland Islands",
+    "SP": "Poland", "SN": "Poland", "SO": "Poland", "SQ": "Poland", "SR": "Poland", "3Z": "Poland", "HF": "Poland",
+    "OK": "Czechia", "OL": "Czechia",
+    "OM": "Slovakia",
+    "HA": "Hungary", "HG": "Hungary",
+    "YO": "Romania", "YP": "Romania", "YQ": "Romania", "YR": "Romania",
+    "LZ": "Bulgaria",
+    "SV": "Greece", "SW": "Greece", "SX": "Greece", "SY": "Greece", "SZ": "Greece", "J4": "Greece", "SV5": "Dodecanese", "SV9": "Crete", "SV/A": "Mount Athos",
+    "TA": "Turkey", "TB": "Turkey", "TC": "Turkey", "YM": "Turkey",
     "Z3": "North Macedonia",
     "ZA": "Albania",
     "9A": "Croatia",
     "S5": "Slovenia",
     "E7": "Bosnia & Herzegovina",
+    "YU": "Serbia", "YT": "Serbia",
     "4O": "Montenegro",
-    "YU": "Serbia",
-    "CU": "Azores",
-    "CT3": "Madeira",
-    "EA8": "Canary Islands",
+    "TF": "Iceland",
+    "YL": "Latvia",
+    "LY": "Lithuania",
+    "ER": "Moldova",
+    "UR": "Ukraine", "US": "Ukraine", "UT": "Ukraine", "UU": "Ukraine", "UV": "Ukraine", "UW": "Ukraine", "UX": "Ukraine", "UY": "Ukraine", "UZ": "Ukraine", "EM": "Ukraine", "EN": "Ukraine", "EO": "Ukraine",
     "C3": "Andorra",
     "T7": "San Marino",
     "3A": "Monaco",
-    "5B": "Cyprus",
+    "HV": "Vatican City",
+    "1A0": "SMOM",
+    "5B": "Cyprus", "C4": "Cyprus", "P3": "Cyprus", "ZC4": "UK Sov. Bases Cyprus",
     "EK": "Armenia",
-    "4J": "Azerbaijan",
-    "ER": "Moldova",
-    "UR": "Ukraine",
+    "4J": "Azerbaijan", "4K": "Azerbaijan",
+    "4L": "Georgia",
+
+    # Asia & Pacific
+    "JA": "Japan", "JE": "Japan", "JF": "Japan", "JG": "Japan", "JH": "Japan", "JI": "Japan", "JJ": "Japan", "JK": "Japan", "JL": "Japan", "JM": "Japan", "JN": "Japan", "JO": "Japan", "JP": "Japan", "JQ": "Japan", "JR": "Japan", "JS": "Japan", "7J": "Japan", "7K": "Japan", "7L": "Japan", "7M": "Japan", "7N": "Japan", "8J": "Japan", "8K": "Japan", "8L": "Japan", "8M": "Japan", "8N": "Japan",
+    "HL": "South Korea", "DS": "South Korea", "DT": "South Korea", "D7": "South Korea", "D8": "South Korea", "D9": "South Korea", "6K": "South Korea", "6L": "South Korea", "6M": "South Korea", "6N": "South Korea",
+    "BV": "Taiwan", "BX": "Taiwan", "BM": "Taiwan", "BN": "Taiwan", "BO": "Taiwan", "BP": "Taiwan", "BQ": "Taiwan", "BU": "Taiwan", "BW": "Taiwan",
+    "BY": "China", "BA": "China", "BD": "China", "BG": "China", "BH": "China", "BI": "China", "BJ": "China", "BL": "China", "BT": "China", "B0": "China", "B2": "China", "B3": "China", "B4": "China", "B5": "China", "B6": "China", "B7": "China", "B8": "China", "B9": "China", "VR": "Hong Kong", "XX9": "Macao",
+    "VK": "Australia", "AX": "Australia", "VI": "Australia", "VJ": "Australia", "VL": "Australia", "VN": "Australia", "VZ": "Australia",
+    "ZL": "New Zealand", "ZM": "New Zealand",
+    "DU": "Philippines", "DV": "Philippines", "DW": "Philippines", "DX": "Philippines", "DY": "Philippines", "DZ": "Philippines", "4D": "Philippines", "4E": "Philippines", "4F": "Philippines", "4G": "Philippines", "4H": "Philippines", "4I": "Philippines",
+    "HS": "Thailand", "E2": "Thailand",
+    "YB": "Indonesia", "YC": "Indonesia", "YD": "Indonesia", "YE": "Indonesia", "YF": "Indonesia", "YG": "Indonesia", "YH": "Indonesia", "7A": "Indonesia", "7B": "Indonesia", "7C": "Indonesia", "7D": "Indonesia", "7E": "Indonesia", "7F": "Indonesia", "7G": "Indonesia", "7H": "Indonesia", "7I": "Indonesia", "8A": "Indonesia", "8B": "Indonesia", "8C": "Indonesia", "8D": "Indonesia", "8E": "Indonesia", "8F": "Indonesia", "8G": "Indonesia", "8H": "Indonesia", "8I": "Indonesia",
+    "9M": "Malaysia", "9W": "Malaysia",
+    "9V": "Singapore",
+    "VU": "India", "AT": "India", "AU": "India", "AV": "India", "AW": "India",
+    "4S": "Sri Lanka",
+    "4X": "Israel", "4Z": "Israel",
+    "A4": "Oman", "A6": "United Arab Emirates", "A7": "Qatar", "A9": "Bahrain", "HZ": "Saudi Arabia", "7Z": "Saudi Arabia", "8Z": "Saudi Arabia", "JY": "Jordan", "OD": "Lebanon", "YK": "Syria", "YI": "Iraq", "EP": "Iran", "EQ": "Iran", "9K": "Kuwait",
+
+    # South America & Africa
+    "PY": "Brazil", "PP": "Brazil", "PR": "Brazil", "PS": "Brazil", "PT": "Brazil", "PU": "Brazil", "PV": "Brazil", "PW": "Brazil", "PX": "Brazil", "ZY": "Brazil", "ZZ": "Brazil",
+    "LU": "Argentina", "AY": "Argentina", "AZ": "Argentina", "L1": "Argentina", "L2": "Argentina", "L3": "Argentina", "L4": "Argentina", "L5": "Argentina", "L6": "Argentina", "L7": "Argentina", "L8": "Argentina", "L9": "Argentina", "LW": "Argentina",
+    "CE": "Chile", "CA": "Chile", "CB": "Chile", "CD": "Chile", "XQ": "Chile", "XR": "Chile", "3G": "Chile",
+    "CX": "Uruguay", "CV": "Uruguay", "CW": "Uruguay",
+    "ZP": "Paraguay",
+    "CP": "Bolivia",
+    "OA": "Peru", "OB": "Peru", "OC": "Peru", "4T": "Peru",
+    "HC": "Ecuador", "HD": "Ecuador",
+    "HK": "Colombia", "HJ": "Colombia", "5J": "Colombia", "5K": "Colombia",
+    "YV": "Venezuela", "YW": "Venezuela", "YX": "Venezuela", "YY": "Venezuela", "4M": "Venezuela",
+    "ZS": "South Africa", "ZR": "South Africa", "ZT": "South Africa", "ZU": "South Africa",
+    "5H": "Tanzania", "5Z": "Kenya", "7X": "Algeria", "CN": "Morocco", "3V": "Tunisia", "SU": "Egypt",
 }
 
 
@@ -257,44 +553,83 @@ class ComparedSpot:
         return "Unknown Park Name"
 
     @property
+    def country_name(self) -> str:
+        """Resolves the full country / entity name for this spot."""
+        dx_entity = self.hunted_park.dx_entity if (self.hunted_park and self.hunted_park.dx_entity) else ""
+        if dx_entity:
+            return dx_entity
+        ref = self.spot.reference or ""
+        loc = self.spot.location_desc or ""
+        
+        # Check US / Canada
+        if loc.startswith("CA-") or loc.startswith("VE-") or ref.startswith("CA-"):
+            return "Canada"
+        if loc.startswith("US-") or loc.startswith("K-") or ref.startswith("US-") or ref.startswith("K-"):
+            return "United States"
+            
+        loc_prefix = loc.split("-")[0].upper() if "-" in loc else loc.upper()
+        if loc_prefix in POTA_PROGRAM_TO_COUNTRY:
+            return POTA_PROGRAM_TO_COUNTRY[loc_prefix]
+
+        prefix = ref.split("-")[0].upper() if "-" in ref else ref.upper()
+        if prefix in POTA_PROGRAM_TO_COUNTRY:
+            return POTA_PROGRAM_TO_COUNTRY[prefix]
+            
+        for p_key, p_country in sorted(POTA_PROGRAM_TO_COUNTRY.items(), key=lambda x: len(x[0]), reverse=True):
+            if loc.startswith(p_key) or prefix.startswith(p_key):
+                return p_country
+        return prefix or "Unknown"
+
+    @property
     def display_location(self) -> str:
+        """
+        Returns clean, compact string for the table Location column:
+        - US: state abbreviation (e.g. 'US-WV')
+        - Canada: province abbreviation (e.g. 'CA-ON')
+        - International: clean Country name (e.g. 'Spain', 'Germany', 'United Kingdom', 'Switzerland')
+        """
         loc = self.spot.location_desc or ""
         ref = self.spot.reference or ""
         prefix = ref.split("-")[0].upper() if "-" in ref else ref.upper()
 
-        dx_entity = self.hunted_park.dx_entity if (self.hunted_park and self.hunted_park.dx_entity) else ""
-
-        # Determine if location is within United States (50 states)
-        is_us = (prefix in ("US", "K") or dx_entity == "United States")
-
-        if is_us:
+        # Check US
+        if prefix in ("US", "K") or loc.startswith("US-") or loc.startswith("K-"):
             if loc:
-                return loc
+                return loc.split(",")[0].strip() if "," in loc else loc
             if self.hunted_park and self.hunted_park.location:
                 return self.hunted_park.location
-            return prefix
+            return "US"
 
-        # For non-US locations, determine country name
-        country = ""
-        if dx_entity and dx_entity != loc:
-            country = dx_entity
-        elif prefix in POTA_PREFIX_TO_COUNTRY:
-            country = POTA_PREFIX_TO_COUNTRY[prefix]
-        else:
-            for p_key, p_country in sorted(POTA_PREFIX_TO_COUNTRY.items(), key=lambda x: len(x[0]), reverse=True):
-                if prefix.startswith(p_key):
-                    country = p_country
-                    break
+        # Check Canada
+        if prefix in ("CA", "VE", "VA", "VY", "VO") or loc.startswith("CA-") or loc.startswith("VE-"):
+            if loc:
+                return loc.split(",")[0].strip() if "," in loc else loc
+            if self.hunted_park and self.hunted_park.location:
+                return self.hunted_park.location
+            return "CA"
 
-        if loc and country:
-            if country.lower() in loc.lower():
+        # For International / DX: Return clean country name
+        country = self.country_name
+        if country and country != "Unknown":
+            return country
+        if loc:
+            return loc
+        return prefix
+
+    @property
+    def full_location_desc(self) -> str:
+        """Returns full location with country and region details for tooltips and spot intelligence."""
+        loc = self.spot.location_desc or ""
+        country = self.country_name
+        if loc and country and country != "Unknown":
+            if loc.upper() == country.upper() or country.upper() in loc.upper():
                 return loc
-            return f"{loc}, {country}"
+            return f"{country} ({loc})"
         elif loc:
             return loc
-        elif country:
+        elif country and country != "Unknown":
             return country
-        return prefix
+        return "Unknown"
 
     @property
     def frequency_mhz_str(self) -> str:

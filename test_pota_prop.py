@@ -5,6 +5,7 @@ Automated unit and integration tests for POTA Hunter
 import os
 import sys
 import unittest
+from unittest.mock import patch, MagicMock
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
@@ -96,7 +97,8 @@ class TestPOTADataEngine(unittest.TestCase):
             location_desc="CA-ON", grid4="", grid6="", latitude=None, longitude=None, count=1, expire=0
         )
         cs_ca = ComparedSpot(spot=spot_ca, is_new=True, qsos_hunted=0)
-        self.assertEqual(cs_ca.display_location, "CA-ON, Canada")
+        self.assertEqual(cs_ca.display_location, "CA-ON")
+        self.assertEqual(cs_ca.full_location_desc, "Canada (CA-ON)")
 
         # Non-US spot (Germany)
         spot_dl = ActiveSpot(
@@ -106,7 +108,8 @@ class TestPOTADataEngine(unittest.TestCase):
             location_desc="DL-BY", grid4="", grid6="", latitude=None, longitude=None, count=1, expire=0
         )
         cs_dl = ComparedSpot(spot=spot_dl, is_new=True, qsos_hunted=0)
-        self.assertEqual(cs_dl.display_location, "DL-BY, Germany")
+        self.assertEqual(cs_dl.display_location, "Germany")
+        self.assertEqual(cs_dl.full_location_desc, "Germany (DL-BY)")
 
     def test_hunter_csv_loading(self):
         csv_path = os.path.join(os.path.expanduser("~"), "Downloads", "hunter_parks.csv")
@@ -2108,7 +2111,7 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
 
         dlg = AuthWebBrowserDialog("https://example.com/login")
         self.assertTrue(hasattr(dlg, "cookie_banner"))
-        self.assertTrue(dlg.cookie_banner.isVisible())
+        self.assertFalse(dlg.cookie_banner.isHidden())
 
         # Simulate finding and clicking the OK button
         from PyQt6.QtWidgets import QPushButton
@@ -2116,8 +2119,320 @@ class TestUtcDayRolloverAndWorkedStatus(unittest.TestCase):
         self.assertIsNotNone(btn_ok)
         btn_ok.click()
 
-        self.assertFalse(dlg.cookie_banner.isVisible())
+        self.assertTrue(dlg.cookie_banner.isHidden())
         dlg.close()
+
+
+class TestAuroraEngine(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    def test_extract_oval_segments_synthetic(self):
+        from aurora_engine import _extract_oval_segments
+        coords = []
+        for lon in range(0, 360, 5):
+            coords.append([lon, 65.0, 15])
+            coords.append([lon, 70.0, 50])
+            coords.append([lon, 75.0, 20])
+            coords.append([lon, -70.0, 15])
+            coords.append([lon, -75.0, 50])
+            coords.append([lon, -80.0, 20])
+
+        n_fringe, n_core = _extract_oval_segments(coords, hemisphere="north", fringe_threshold=5, core_threshold=30)
+        self.assertTrue(len(n_fringe) > 0)
+        self.assertTrue(len(n_core) > 0)
+        self.assertAlmostEqual(n_fringe[0][0][0], 65.0, delta=1.0)
+        self.assertAlmostEqual(n_core[0][0][0], 70.0, delta=1.0)
+
+        s_fringe, s_core = _extract_oval_segments(coords, hemisphere="south", fringe_threshold=5, core_threshold=30)
+        self.assertTrue(len(s_fringe) > 0)
+        self.assertTrue(len(s_core) > 0)
+        self.assertAlmostEqual(s_fringe[0][0][0], -70.0, delta=1.0)
+        self.assertAlmostEqual(s_core[0][0][0], -75.0, delta=1.0)
+
+    @patch("requests.get")
+    def test_fetch_ovation_aurora_lines_mock(self, mock_get):
+        from aurora_engine import fetch_ovation_aurora_lines
+        mock_response = MagicMock()
+        coords = []
+        for lon in range(0, 360, 10):
+            coords.append([lon, 68.0, 25])
+            coords.append([lon, -72.0, 25])
+        mock_response.json.return_value = {
+            "Observation Time": "2026-08-18T12:00:00Z",
+            "Forecast Time": "2026-08-18T12:30:00Z",
+            "coordinates": coords
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        lines = fetch_ovation_aurora_lines(force_refresh=True)
+        self.assertIsInstance(lines, list)
+        self.assertTrue(len(lines) >= 2)
+        for l in lines:
+            self.assertIn("coords", l)
+            self.assertIn("style", l)
+            self.assertIn("color", l["style"])
+
+    def test_app_aurora_push_to_map(self):
+        from pota_prop import POTAPropApp
+        window = POTAPropApp()
+        mock_lines = [
+            {"coords": [[[65.0, -100.0], [66.0, -90.0]]], "style": {"color": "#6e7681", "weight": 1.5, "dashArray": "6, 6"}},
+            {"coords": [[[-70.0, 100.0], [-71.0, 110.0]]], "style": {"color": "#6e7681", "weight": 1.5, "dashArray": "6, 6"}}
+        ]
+        window.on_aurora_fetched(mock_lines)
+        self.assertEqual(window.aurora_lines, mock_lines)
+        if window.map_server:
+            self.assertEqual(window.map_server.map_data.get("aurora"), mock_lines)
+        window.close()
+
+    def test_auth_populates_callsign_in_preferences(self):
+        from pota_prop import POTAPropApp
+        window = POTAPropApp()
+        window.my_call = ""
+        
+        # Mock authenticator returning callsign
+        with patch.object(window.authenticator, "get_callsign", return_value="W7KMC"), \
+             patch.object(window, "sync_hunter_log"):
+            window.on_auth_state_changed(True)
+            self.assertEqual(window.my_call, "W7KMC")
+            self.assertIn("W7KMC", window.btn_auth.text())
+        window.close()
+
+
+class TestSummaryEngine(unittest.TestCase):
+    """Tests for summary_engine.py narrative synthesis, AI prompt generation, and dialog."""
+
+    def setUp(self):
+        from propagation_engine import SolarWeather
+        self.solar = SolarWeather()
+        self.solar.sfi = 155.0
+        self.solar.ssn = 110
+        self.solar.a_index = 6.0
+        self.solar.k_index = 1.67
+        self.solar.solar_wind_speed = 380.0
+        self.solar.solar_wind_density = 4.2
+        self.solar.radio_blackout_scale = "R0"
+        self.telemetry = {
+            "timestamp": "2026-08-18 14:30 UTC",
+            "my_call": "W7KMC",
+            "grid": "EM98dh",
+            "solar_weather": self.solar,
+            "drap_summary": {"highest_absorption_db": 0.5},
+            "aurora_lines": [{"coords": []}],
+            "meteor_summary": {"active_showers": ["Perseids"], "peak_zhr": 50},
+            "lightning_summary": {"strikes_100km": 12, "strikes_300km": 45, "closest_km": 42.5},
+            "weather_summary": {"temperature_c": 24.5, "pressure_hpa": 1016.2, "wind_speed_kph": 12.0},
+            "spot_stats": {
+                "total_active_spots": 35,
+                "band_counts": {"20m": 18, "40m": 10, "15m": 7},
+                "top_regions": [("US-NC", 6), ("US-VA", 4)]
+            }
+        }
+
+    def test_generate_propagation_summary_contains_key_sections(self):
+        from summary_engine import generate_propagation_summary
+        from propagation_engine import SpaceWeather3DayForecast, SpaceWeather27DayOutlook
+        self.telemetry["solar_weather"].forecast_3day = SpaceWeather3DayForecast(
+            days=["Aug 19", "Aug 20", "Aug 21"],
+            sfi_forecast=[150.0, 155.0, 150.0],
+            ap_forecast=[8, 14, 6],
+            kp_max_forecast=[2.67, 3.67, 2.0],
+            m_flare_prob=[45, 55, 35],
+            x_flare_prob=[5, 10, 5],
+            proton_prob=[1, 1, 1],
+            geomag_scale=["G0 (Quiet)", "G0 (Unsettled)", "G0 (Quiet)"]
+        )
+        self.telemetry["solar_weather"].outlook_27day = SpaceWeather27DayOutlook(
+            daily_projections=[("2026-08-19", 150.0, 8), ("2026-08-20", 155.0, 14)],
+            sfi_7day_avg=152.0,
+            sfi_peak_window="Aug 26 - Sep 02 (Peak SFI ~170)",
+            recurrent_storm_window="Sep 04 - Sep 06 (Ap ~22, Unsettled/Storm)"
+        )
+        summary = generate_propagation_summary(self.telemetry)
+        self.assertIn("PROPAGATION & OPERATING SUMMARY", summary)
+        self.assertIn(".SYNOPSIS...", summary)
+        self.assertIn(".BAND CONDITIONS & OPERATING OUTLOOK...", summary)
+        self.assertIn(".SHORT-TERM 3-DAY PROPAGATION OUTLOOK", summary)
+        self.assertIn(".EXTENDED 27-DAY SOLAR CYCLE & RECURRENT OUTLOOK", summary)
+        self.assertIn("Aug 26 - Sep 02 (Peak SFI ~170)", summary)
+        self.assertIn(".SPACE WEATHER & SPECIAL PHENOMENA...", summary)
+        self.assertIn(".LOCAL QRN & THUNDERSTORM HAZARDS...", summary)
+        self.assertIn("SEASONAL QRN CLIMATOLOGY", summary)
+        self.assertIn(".POTA ACTIVITY & PROPAGATION HOTSPOTS...", summary)
+        self.assertIn(".RECOMMENDED OPERATING STRATEGY...", summary)
+        self.assertIn("W7KMC", summary)
+        self.assertIn("EM98dh", summary)
+        self.assertIn("LIGHTNING ALERT", summary)
+        self.assertIn("Perseids", summary)
+
+    def test_seasonal_qrn_climatology(self):
+        from weather_engine import get_seasonal_qrn_climatology
+        north_aug = get_seasonal_qrn_climatology(40.0, month=8)
+        self.assertIn("Northern temperate latitudes", north_aug)
+        self.assertIn("autumn", north_aug)
+
+        south_aug = get_seasonal_qrn_climatology(-35.0, month=8)
+        self.assertIn("Southern temperate latitudes", south_aug)
+        self.assertIn("spring", south_aug)
+
+        tropics = get_seasonal_qrn_climatology(5.0, month=8)
+        self.assertIn("Intertropical Convergence Zone", tropics)
+
+    def test_convective_forecast_in_summary(self):
+        from summary_engine import generate_propagation_summary
+        from weather_engine import Convective3DayForecast, ConvectiveDayForecast
+        self.telemetry["weather_summary"]["convective_3day"] = Convective3DayForecast(
+            days=[
+                ConvectiveDayForecast("Aug 19", 65, 60, 1850.0, 95, "Thunderstorm", "Elevated QRN risk (+10 to +18 dB)"),
+                ConvectiveDayForecast("Aug 20", 20, 15, 450.0, 2, "Partly Cloudy", "Quiet baseline noise floor"),
+                ConvectiveDayForecast("Aug 21", 5, 5, 100.0, 0, "Clear Sky", "Quiet baseline noise floor"),
+            ]
+        )
+        summary = generate_propagation_summary(self.telemetry)
+        self.assertIn("3-DAY CONVECTIVE & QRN OUTLOOK", summary)
+        self.assertIn("Aug 19", summary)
+        self.assertIn("65% Rain / 60% Thunderstorm Risk", summary)
+        self.assertIn("CAPE 1850 J/kg", summary)
+
+    def test_parse_noaa_3day_forecast(self):
+        from propagation_engine import parse_noaa_3day_forecast
+        sample_3day = """
+:Product: 3-Day Forecast
+:Issued: 2026 Aug 18 1230 UTC
+A. NOAA Geomagnetic Activity Observation and Forecast
+NOAA Kp index breakdown Aug 18-Aug 20 2026
+
+             Aug 18       Aug 19       Aug 20
+00-03UT       4.00         3.67         4.00     
+03-06UT       5.00 (G1)    4.67 (G1)    3.33     
+06-09UT       3.33         4.00         3.33     
+09-12UT       2.33         3.67         3.00     
+12-15UT       3.67         3.00         2.33     
+15-18UT       2.00         2.33         2.00     
+18-21UT       2.33         2.67         2.33     
+21-00UT       3.00         3.33         3.00     
+
+Rationale: Coronal hole high speed stream arrival expected Aug 19.
+
+10 cm Radio Flux: 150/155/150
+Planetary A-index: 12/16/8
+Class M 45/55/35
+Class X 5/10/5
+Proton 1/1/1
+"""
+        forecast = parse_noaa_3day_forecast(sample_3day, current_sfi=148.0, current_ap=10)
+        self.assertEqual(len(forecast.days), 3)
+        self.assertEqual(forecast.days[0], "Aug 18")
+        self.assertEqual(forecast.sfi_forecast, [150.0, 155.0, 150.0])
+        self.assertEqual(forecast.ap_forecast, [12, 16, 8])
+        self.assertEqual(forecast.kp_max_forecast, [5.0, 4.67, 4.0])
+        self.assertEqual(forecast.m_flare_prob, [45, 55, 35])
+        self.assertEqual(forecast.x_flare_prob, [5, 10, 5])
+        self.assertEqual(forecast.proton_prob, [1, 1, 1])
+        self.assertIn("G1", forecast.geomag_scale[0])
+
+    def test_parse_noaa_27day_outlook(self):
+        from propagation_engine import parse_noaa_27day_outlook
+        sample_27day = """
+# 27-day Space Weather Outlook Table
+# Issued 2026-08-17
+#   UTC      Radio Flux   Planetary   Largest
+#  Date       10.7 cm      A Index    Kp Index
+2026-08-18    150           8           3
+2026-08-19    152           10          3
+2026-08-20    155           14          4
+2026-08-21    160           18          4
+2026-08-22    170           12          3
+2026-08-23    175           8           2
+2026-08-24    175           6           2
+2026-08-25    165           6           2
+"""
+        outlook = parse_noaa_27day_outlook(sample_27day, current_sfi=148.0)
+        self.assertEqual(len(outlook.daily_projections), 8)
+        self.assertEqual(outlook.daily_projections[0], ("2026-08-18", 150.0, 8))
+        self.assertGreater(outlook.sfi_7day_avg, 150.0)
+        self.assertIn("175", outlook.sfi_peak_window)
+        self.assertIn("18", outlook.recurrent_storm_window)
+
+    def test_format_tooltip_html_with_forecast_table(self):
+        from propagation_engine import SolarWeather, SpaceWeather3DayForecast
+        sw = SolarWeather(
+            sfi=150.0,
+            k_index=2.0,
+            a_index=8.0,
+            forecast_3day=SpaceWeather3DayForecast(
+                days=["Aug 19", "Aug 20", "Aug 21"],
+                sfi_forecast=[150.0, 155.0, 150.0],
+                ap_forecast=[8, 14, 6],
+                kp_max_forecast=[2.67, 3.67, 2.0],
+                m_flare_prob=[45, 55, 35],
+                x_flare_prob=[5, 10, 5],
+                proton_prob=[1, 1, 1],
+                geomag_scale=["G0 (Quiet)", "G0 (Unsettled)", "G0 (Quiet)"]
+            )
+        )
+        html = sw.format_tooltip_html()
+        self.assertIn("NOAA SWPC 3-Day Space Weather Forecast", html)
+        self.assertIn("10.7cm Solar Flux:", html)
+        self.assertIn("Planetary A-Index:", html)
+        self.assertIn("M-Class Flare", html)
+
+    def test_propagation_summary_dialog_headless(self):
+        from pota_prop import PropagationSummaryDialog
+        dialog = PropagationSummaryDialog(self.telemetry)
+        self.assertIn(".SYNOPSIS...", dialog.txt_display.toPlainText())
+        self.assertIn("W7KMC", dialog.txt_display.toPlainText())
+        self.assertIn("EM98dh", dialog.txt_display.toPlainText())
+        dialog.copy_to_clipboard()
+        dialog.close()
+
+    def test_app_collect_telemetry_and_button(self):
+        from pota_prop import POTAPropApp
+        window = POTAPropApp()
+        self.assertTrue(hasattr(window, "btn_prop_summary"))
+        self.assertEqual(window.btn_prop_summary.text(), "Propagation Summary")
+        
+        telemetry = window.collect_telemetry_data()
+        self.assertIsInstance(telemetry, dict)
+        self.assertIn("solar_weather", telemetry)
+        self.assertIn("spot_stats", telemetry)
+        self.assertIn("grid", telemetry)
+        window.close()
+
+    def test_map_heatmap_lifecycle_and_filter_decoupling(self):
+        from pota_prop import POTAPropApp
+        window = POTAPropApp()
+        
+        # Verify initial map state
+        self.assertEqual(window.map_band, "20m")
+        self.assertEqual(window.map_mode, "SSB")
+        
+        # Main window table filter is "All" by default or user choice
+        window.combo_band.setCurrentText("All")
+        window.combo_mode.setCurrentText("All")
+        
+        # When 10-minute periodic update fires, it must use map_band (20m), not table filter ("All")
+        with patch.object(window, "recalculate_map_heatmap") as mock_recalc:
+            window.push_all_data_to_map()
+            mock_recalc.assert_called_with("20m", "SSB")
+            
+        # When user changes map filter (e.g. from Leaflet map UI to 40m CW)
+        with patch.object(window, "recalculate_map_heatmap") as mock_recalc:
+            window.on_web_filter_changed("40m", "CW")
+            self.assertEqual(window.map_band, "40m")
+            self.assertEqual(window.map_mode, "CW")
+            mock_recalc.assert_called_with("40m", "CW")
+            
+        # Subsequent periodic timer push must now retain 40m CW
+        with patch.object(window, "recalculate_map_heatmap") as mock_recalc:
+            window.push_all_data_to_map()
+            mock_recalc.assert_called_with("40m", "CW")
+            
+        window.close()
 
 
 if __name__ == "__main__":
