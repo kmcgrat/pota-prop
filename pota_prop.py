@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 from map_server import MapServerManager
 from drap_engine import get_drap_status, get_drap_last_sync_time
 
-APP_VERSION = "26.8.17-2"
+APP_VERSION = "26.8.17-4"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
