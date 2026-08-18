@@ -61,7 +61,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "pota-prop" --upx-dir=/usr/bin --exclude-module PyQt6.QtQml --exclude-module PyQt6.QtQuick --exclude-module PyQt6.QtSql --exclude-module PyQt6.QtSensors --exclude-module PyQt6.QtMultimedia --exclude-module PyQt6.QtBluetooth --exclude-module PyQt6.QtNfc --exclude-module PyQt6.QtWebSockets --exclude-module PyQt6.QtPositioning --exclude-module PyQt6.QtTest --add-data "pota_prop.png:." --add-data "map.html:." main.py
+          EXCLUDES="--exclude-module PyQt6.QtQml --exclude-module PyQt6.QtQuick --exclude-module PyQt6.QtSql --exclude-module PyQt6.QtSensors --exclude-module PyQt6.QtMultimedia --exclude-module PyQt6.QtBluetooth --exclude-module PyQt6.QtNfc --exclude-module PyQt6.QtWebSockets --exclude-module PyQt6.QtPositioning --exclude-module PyQt6.QtTest --exclude-module PyQt6.QtDesigner --exclude-module PyQt6.QtHelp --exclude-module PyQt6.QtLocation --exclude-module PyQt6.QtPrintSupport --exclude-module PyQt6.QtQuickWidgets --exclude-module PyQt6.QtRemoteObjects --exclude-module PyQt6.QtSerialPort --exclude-module PyQt6.QtSvg --exclude-module PyQt6.QtSvgWidgets --exclude-module PyQt6.QtTextToSpeech --exclude-module PyQt6.QtXml --exclude-module tkinter --exclude-module unittest --exclude-module pdb --exclude-module pydoc"
+          pyinstaller --noconfirm --onedir --windowed --name "pota-prop" --upx-dir=/usr/bin $EXCLUDES --add-data "pota_prop.png:." --add-data "map.html:." main.py
           mkdir -p AppDir/usr/bin
           cp -r dist/pota-prop/* AppDir/usr/bin/
 
@@ -91,7 +92,8 @@ jobs:
         shell: bash
         run: |
           python -c "from PIL import Image; Image.open('pota_prop.png').save('pota_prop.ico')"
-          pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.ico" --exclude-module PyQt6.QtQml --exclude-module PyQt6.QtQuick --exclude-module PyQt6.QtSql --exclude-module PyQt6.QtSensors --exclude-module PyQt6.QtMultimedia --exclude-module PyQt6.QtBluetooth --exclude-module PyQt6.QtNfc --exclude-module PyQt6.QtWebSockets --exclude-module PyQt6.QtPositioning --exclude-module PyQt6.QtTest --add-data "pota_prop.png;." --add-data "map.html;." main.py
+          EXCLUDES="--exclude-module PyQt6.QtQml --exclude-module PyQt6.QtQuick --exclude-module PyQt6.QtSql --exclude-module PyQt6.QtSensors --exclude-module PyQt6.QtMultimedia --exclude-module PyQt6.QtBluetooth --exclude-module PyQt6.QtNfc --exclude-module PyQt6.QtWebSockets --exclude-module PyQt6.QtPositioning --exclude-module PyQt6.QtTest --exclude-module PyQt6.QtDesigner --exclude-module PyQt6.QtHelp --exclude-module PyQt6.QtLocation --exclude-module PyQt6.QtPrintSupport --exclude-module PyQt6.QtQuickWidgets --exclude-module PyQt6.QtRemoteObjects --exclude-module PyQt6.QtSerialPort --exclude-module PyQt6.QtSvg --exclude-module PyQt6.QtSvgWidgets --exclude-module PyQt6.QtTextToSpeech --exclude-module PyQt6.QtXml --exclude-module tkinter --exclude-module unittest --exclude-module pdb --exclude-module pydoc"
+          pyinstaller --noconfirm --onefile --windowed --name "pota-prop" --icon "pota_prop.ico" $EXCLUDES --add-data "pota_prop.png;." --add-data "map.html;." main.py
 
       # --- Artifact Uploads ---
       # Removed actions/upload-artifact steps to save storage quota. 

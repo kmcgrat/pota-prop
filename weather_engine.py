@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import logging
-import math
 from typing import List, Optional, Tuple
 import urllib.request
 import urllib.parse

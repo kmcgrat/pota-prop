@@ -381,7 +381,6 @@ class RegionalLightningSummary:
             )
 
         d = self.closest_storm_miles
-        count = self.active_storm_count
         d_round = int(round(d))
         d_str = f"~{d_round} mi" if d_round > 0 else "< 1 mi"
 

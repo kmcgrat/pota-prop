@@ -14,12 +14,13 @@ import socket
 import webbrowser
 import logging
 import math
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 from map_server import MapServerManager
+from drap_engine import get_drap_status, get_drap_last_sync_time
 
-APP_VERSION = "26.8.17-1"
+APP_VERSION = "26.8.17-2"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -108,7 +109,6 @@ from PyQt6.QtCore import (
     QObject,
     QRunnable,
     QSettings,
-    QSize,
     Qt,
     QUrl,
     QThreadPool,
@@ -133,7 +133,6 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
     QDialog,
     QDialogButtonBox,
@@ -148,11 +147,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QToolBar,
-    QRadioButton,
     QScrollArea,
-    QSizePolicy,
-    QSplitter,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -160,7 +155,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings
+from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWebChannel import QWebChannel
 
 from data_engine import (
@@ -178,7 +173,6 @@ from data_engine import (
 )
 from auth_engine import POTAAuthenticator
 from lightning_engine import (
-    LightningActivityLevel,
     RegionalLightningSummary,
     fetch_regional_lightning_summary,
     reset_lightning_engine_location,
@@ -195,18 +189,14 @@ from propagation_engine import (
     DEFAULT_TX_POWER_WATTS,
     POWER_PRESETS,
     BandNoiseBreakdown,
-    CallsignLocation,
     CallsignResolver,
     PropagationResult,
     SolarWeather,
-    SpotEvidence,
     compute_band_noise_matrix,
     fetch_live_solar_weather,
     is_self_spot,
     maidenhead_to_latlon,
-    resolve_antenna_preset,
     calculate_qso_probability,
-    calculate_distance_and_bearing,
     RegionalPathMatrix,
 )
 
@@ -506,28 +496,103 @@ def format_muf_telemetry(prop: Optional[PropagationResult]) -> str:
 
 
 
-class FetchSpotsWorkerSignals(QObject):
-    finished = pyqtSignal(list, object, object)
+class FetchPotaWorkerSignals(QObject):
+    finished = pyqtSignal(list)
     error = pyqtSignal(str)
 
 
-class FetchSpotsWorker(QRunnable):
-    """Background worker to fetch live spots, NOAA solar weather, and regional lightning without freezing the UI."""
+class FetchPotaWorker(QRunnable):
+    """Background worker to fetch live active spots."""
 
-    def __init__(self, home_lat: float = 38.3125, home_lon: float = -81.7083):
+    def __init__(self):
         super().__init__()
-        self.home_lat = home_lat
-        self.home_lon = home_lon
-        self.signals = FetchSpotsWorkerSignals()
+        self.signals = FetchPotaWorkerSignals()
         self.setAutoDelete(True)
 
     @pyqtSlot()
     def run(self):
         try:
             spots = fetch_active_spots(timeout=10)
-            solar = fetch_live_solar_weather(timeout=5)
-            lightning = fetch_regional_lightning_summary(self.home_lat, self.home_lon, timeout=5)
-            self.signals.finished.emit(spots, solar, lightning)
+            self.signals.finished.emit(spots)
+        except Exception as e:
+            try:
+                self.signals.error.emit(str(e))
+            except RuntimeError:
+                pass
+
+
+class FetchSolarWorkerSignals(QObject):
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+
+class FetchSolarWorker(QRunnable):
+    """Background worker to fetch NOAA solar weather."""
+
+    def __init__(self):
+        super().__init__()
+        self.signals = FetchSolarWorkerSignals()
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            solar = fetch_live_solar_weather(timeout=10)
+            self.signals.finished.emit(solar)
+        except Exception as e:
+            try:
+                self.signals.error.emit(str(e))
+            except RuntimeError:
+                pass
+
+
+class FetchLightningWorkerSignals(QObject):
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+
+class FetchLightningWorker(QRunnable):
+    """Background worker to fetch regional lightning."""
+
+    def __init__(self, home_lat: float, home_lon: float):
+        super().__init__()
+        self.home_lat = home_lat
+        self.home_lon = home_lon
+        self.signals = FetchLightningWorkerSignals()
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            lightning = fetch_regional_lightning_summary(self.home_lat, self.home_lon, timeout=10)
+            self.signals.finished.emit(lightning)
+        except Exception as e:
+            try:
+                self.signals.error.emit(str(e))
+            except RuntimeError:
+                pass
+
+
+class PhysicsWorkerSignals(QObject):
+    finished = pyqtSignal(list, object)
+    error = pyqtSignal(str)
+
+class PhysicsWorker(QRunnable):
+    """Background worker to compute heavy RF propagation math for all spots without freezing the UI."""
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+        self.signals = PhysicsWorkerSignals()
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            from data_engine import compare_active_spots
+            self.kwargs['fast_mode'] = False
+            compared = compare_active_spots(**self.kwargs)
+            matrix = getattr(compare_active_spots, "last_regional_matrix", None)
+            self.signals.finished.emit(compared, matrix)
         except Exception as e:
             try:
                 self.signals.error.emit(str(e))
@@ -569,7 +634,10 @@ class FetchActivatorPSKWorker(QRunnable):
             spots = fetch_activator_psk_spots(self.activator_call, max_age_minutes=15)
             self.signals.finished.emit(spots)
         except Exception:
-            self.signals.finished.emit([])
+            try:
+                self.signals.finished.emit([])
+            except RuntimeError:
+                pass
 
 class CallsignLookupWorkerSignals(QObject):
     finished = pyqtSignal(object)
@@ -1760,7 +1828,7 @@ class SettingsDialog(QDialog):
                         nodes = live_nodes + nodes
                     else:
                         error_msg = "No live skimmers found within 200 miles."
-                except Exception as e:
+                except Exception:
                     error_msg = "Network or parsing error."
                     
         # deduplicate while preserving order
@@ -2861,17 +2929,42 @@ class POTAPropApp(QMainWindow):
         self.lightning_summary: Optional[RegionalLightningSummary] = None
         self.acknowledged_nws_warnings: set = set()
         self._is_fetching = False
+        self.spot_cache = {}
 
-        # Auto refresh timer
+        self.last_pota_fetch_time = 0.0
+        self.last_psk_fetch_time = 0.0
+        self.last_swpc_fetch_time = 0.0
+        self.last_wx_fetch_time = 0.0
+        self.last_ltng_fetch_time = 0.0
+
+        # POTA Spots Auto Refresh Timer (Interval set by combo box)
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.fetch_spots)
+
+        # NOAA Space Weather Timer (20 minutes)
+        self.solar_timer = QTimer(self)
+        self.solar_timer.timeout.connect(self.fetch_solar)
+        self.solar_timer.start(1_200_000)
+        QTimer.singleShot(10000, self.fetch_solar)  # SWPC at 10s
+
+        # Lightning Timer (5 seconds) - Polls local background websocket
+        self.lightning_timer = QTimer(self)
+        self.lightning_timer.timeout.connect(self.fetch_lightning)
+        self.lightning_timer.start(5_000)
         
-        # PSK Reporter Background Fetch Timer (Round Robin across nodes)
+        # Periodic Weather Refresh Timer (every 15 minutes)
+        self.weather_summary: Optional[WeatherForecastSummary] = None
+        self.weather_timer = QTimer(self)
+        self.weather_timer.timeout.connect(lambda: self.refresh_weather_display(force_refresh=True))
+        self.weather_timer.start(900000)  # 15 minutes
+        QTimer.singleShot(30000, lambda: self.refresh_weather_display(force_refresh=True)) # WX at 30s
+        
+        # PSK Reporter / RBN Nodes Timer
         self.psk_timer = QTimer(self)
         self.psk_timer.timeout.connect(self.fetch_psk_spots)
         interval = max(60000, 900000 // max(1, len(self.rbn_nodes_list)))
         self.psk_timer.start(interval)
-        QTimer.singleShot(1000, self.fetch_psk_spots)  # Fetch immediately on boot
+        QTimer.singleShot(15000, self.fetch_psk_spots)  # PSK at 15s
 
         # Targeted Activator PSK Polling
         self.activator_psk_queue = []
@@ -2880,17 +2973,9 @@ class POTAPropApp(QMainWindow):
         self.activator_psk_timer.timeout.connect(self.process_activator_psk_queue)
         self.activator_psk_timer.start(60000)  # Check queue every 60 seconds
 
-        # Status Message Queue (displays messages for 5s then moves to next)
-        self.status_queue = []
-        self.status_queue_timer = QTimer(self)
-        self.status_queue_timer.timeout.connect(self._process_status_queue)
 
-        # Adaptive Startup Lightning Refresh Timer:
-        # Every 5 seconds for the first 30 seconds, then every 10 seconds for the next 30 seconds.
-        self.startup_lightning_start_time = time.time()
-        self.startup_lightning_timer = QTimer(self)
-        self.startup_lightning_timer.timeout.connect(self._on_startup_lightning_tick)
-        self.startup_lightning_timer.start(5000)
+
+
 
         # UTC Day 00Z Rollover Timer (checks every 15s for 00Z day boundary crossing)
         self.utc_rollover_timer = QTimer(self)
@@ -2902,15 +2987,10 @@ class POTAPropApp(QMainWindow):
         self.utc_clock_timer.timeout.connect(self.update_utc_clock)
         self.utc_clock_timer.start(1000)
 
-        # Periodic Weather Refresh Timer (every 15 minutes)
         self.weather_summary: Optional[WeatherForecastSummary] = None
-        self.weather_timer = QTimer(self)
-        self.weather_timer.timeout.connect(lambda: self.refresh_weather_display(force_refresh=True))
-        self.weather_timer.start(900000)  # 15 minutes
 
         self.init_ui()
         self.update_utc_clock()
-        self.refresh_weather_display()
 
         # Explicitly initialize auto-refresh timer with saved combo interval
         self.on_refresh_interval_changed(self.combo_refresh.currentIndex())
@@ -2922,17 +3002,99 @@ class POTAPropApp(QMainWindow):
 
         self.load_initial_csv()
         self.recompute_comparisons()
-        self.fetch_psk_spots()
+        
+        # Prioritize fetching active POTA spots immediately on startup
         self.fetch_spots()
 
+    def update_widget_history(self, lbl: QLabel, msg: str):
+        if not hasattr(lbl, '_history'):
+            lbl._history = []
+            
+        from datetime import datetime
+        now_str = datetime.now().strftime("%H:%M:%S")
+        lbl._history.insert(0, f"[{now_str}] {msg}")
+        if len(lbl._history) > 3:
+            lbl._history.pop()
+            
+        base = getattr(lbl, '_base_tooltip', lbl.toolTip())
+        lbl.setToolTip(f"{base}\n\nRecent Activity:\n" + "\n".join(lbl._history))
+
     def update_utc_clock(self):
-        """Updates live UTC clock displays in 'Time: HH:MM UTC' format."""
+        """Updates live UTC clock on top, and dynamic sync age widgets on bottom."""
         now_utc = datetime.now(timezone.utc)
         clock_text = now_utc.strftime("Time: %H:%M UTC")
         if hasattr(self, "lbl_utc_clock_top"):
             self.lbl_utc_clock_top.setText(clock_text)
-        if hasattr(self, "lbl_utc_clock_bottom"):
-            self.lbl_utc_clock_bottom.setText(clock_text)
+
+        now = time.time()
+
+        def format_age(last_time: float, expected_interval: int) -> tuple[str, str]:
+            if last_time == 0:
+                return "<1m", "#7ee787"  # Green
+            
+            elapsed = int(now - last_time)
+            
+            if elapsed > expected_interval * 3:
+                color = "#f85149" # Red
+            elif elapsed > expected_interval * 1.5:
+                color = "#d29922" # Yellow
+            else:
+                color = "#7ee787" # Green
+                
+            if elapsed < 60:
+                text = "<1m"
+            else:
+                text = f"{elapsed // 60}m"
+                
+            return text, color
+
+        if hasattr(self, "lbl_status_pota"):
+            pota_interval = 60 # POTA updates frequently (1-5m based on user dropdown)
+            idx = getattr(self, 'refresh_interval_idx', 2) # Default 1m
+            if idx == 0: pota_interval = 999999
+            elif idx == 1: pota_interval = 30
+            elif idx == 2: pota_interval = 60
+            elif idx == 3: pota_interval = 180
+            elif idx == 4: pota_interval = 300
+            
+            text, color = format_age(self.last_pota_fetch_time, pota_interval)
+            self.lbl_status_pota.setText(f"POTA: {text}")
+            self.lbl_status_pota.setStyleSheet(f"color: {color}; font-family: 'Consolas', monospace; font-weight: bold; font-size: 13px; background-color: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;")
+
+        if hasattr(self, "lbl_status_pskr"):
+            # PSK updates via round robin every 1-15 minutes
+            interval = max(60, 900 // max(1, len(getattr(self, 'rbn_nodes_list', ["W1AW"]))))
+            text, color = format_age(self.last_psk_fetch_time, interval)
+            self.lbl_status_pskr.setText(f"PSKR/RBN: {text}")
+            self.lbl_status_pskr.setStyleSheet(f"color: {color}; font-family: 'Consolas', monospace; font-weight: bold; font-size: 13px; background-color: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;")
+
+        if hasattr(self, "lbl_status_swpc"):
+            text, color = format_age(self.last_swpc_fetch_time, 1200) # 20m
+            self.lbl_status_swpc.setText(f"SWPC: {text}")
+            self.lbl_status_swpc.setStyleSheet(f"color: {color}; font-family: 'Consolas', monospace; font-weight: bold; font-size: 13px; background-color: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;")
+
+        if hasattr(self, "lbl_status_drap"):
+            drap_time = get_drap_last_sync_time()
+            if getattr(self, '_last_drap_time_tracked', 0) != drap_time and drap_time > 0:
+                self._last_drap_time_tracked = drap_time
+                self.update_widget_history(self.lbl_status_drap, "Fetched updated HAF grid")
+                
+            text, color = format_age(drap_time, 900) # 15m
+            if get_drap_status().startswith("Error"):
+                text = "Error"
+                color = "#f85149"
+            self.lbl_status_drap.setText(f"DRAP: {text}")
+            self.lbl_status_drap.setStyleSheet(f"color: {color}; font-family: 'Consolas', monospace; font-weight: bold; font-size: 13px; background-color: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;")
+
+        if hasattr(self, "lbl_status_wx"):
+            text, color = format_age(self.last_wx_fetch_time, 900) # 15m
+            self.lbl_status_wx.setText(f"WX: {text}")
+            self.lbl_status_wx.setStyleSheet(f"color: {color}; font-family: 'Consolas', monospace; font-weight: bold; font-size: 13px; background-color: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;")
+
+        if hasattr(self, "lbl_status_ltng"):
+            text, color = format_age(self.last_ltng_fetch_time, 5) # 5s
+            self.lbl_status_ltng.setText(f"LTNG: {text}")
+            self.lbl_status_ltng.setStyleSheet(f"color: {color}; font-family: 'Consolas', monospace; font-weight: bold; font-size: 13px; background-color: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;")
 
     def get_worked_status(self, park_ref: str) -> Optional[str]:
         """
@@ -2976,15 +3138,25 @@ class POTAPropApp(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
 
-        # Permanent live UTC clock on status bar
-        self.lbl_utc_clock_bottom = QLabel()
-        self.lbl_utc_clock_bottom.setStyleSheet(
-            "color: #79c0ff; font-family: 'Consolas', 'Courier New', monospace; "
-            "font-weight: bold; font-size: 13px; background-color: #161b22; "
-            "border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;"
-        )
-        self.lbl_utc_clock_bottom.setToolTip("Current Coordinated Universal Time (UTC)")
-        self.status_bar.addPermanentWidget(self.lbl_utc_clock_bottom)
+        def make_status_lbl(tooltip=""):
+            lbl = QLabel()
+            lbl.setStyleSheet(
+                "color: #8b949e; font-family: 'Consolas', 'Courier New', monospace; "
+                "font-weight: bold; font-size: 13px; background-color: #161b22; "
+                "border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;"
+            )
+            lbl._base_tooltip = tooltip
+            lbl._history = []
+            lbl.setToolTip(tooltip)
+            self.status_bar.addPermanentWidget(lbl)
+            return lbl
+
+        self.lbl_status_pota = make_status_lbl("POTA API Spots Sync Status")
+        self.lbl_status_pskr = make_status_lbl("PSKReporter / RBN Nodes Sync Status")
+        self.lbl_status_swpc = make_status_lbl("NOAA SWPC Solar Weather Sync Status")
+        self.lbl_status_drap = make_status_lbl("NOAA SWPC D-RAP Absorption Model Sync Status")
+        self.lbl_status_wx = make_status_lbl("NWS Regional Weather Sync Status")
+        self.lbl_status_ltng = make_status_lbl("Blitzortung Regional Lightning Sync Status")
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -3082,6 +3254,7 @@ class POTAPropApp(QMainWindow):
                     "call": c.spot.activator,
                     "park": f"{c.spot.reference} ({c.spot.park_name})" if c.spot.park_name else c.spot.reference,
                     "band": c.spot.band,
+                    "freq": c.frequency_mhz_str,
                     "mode": getattr(c.spot, "mode", "SSB"),
                     "muf": round(c.propagation.muf_est_mhz, 1) if getattr(c.propagation, 'muf_est_mhz', None) else None
                 })
@@ -3561,7 +3734,7 @@ class POTAPropApp(QMainWindow):
         self.card_solar.setToolTip(self.solar_weather.format_tooltip_html())
         self.card_meteor = StatCard("Meteor Activity", "ZHR: -- | Shower: --", "#8b949e")
         self.card_lightning = StatCard("Lightning", "1", "#2ea043")
-        self.card_noise = StatCard("Band Noise", "40m: S0 | 20m: S0", "#58a6ff", is_clickable=True)
+        self.card_noise = StatCard("Noise", "40m: S0 | 20m: S0", "#58a6ff", is_clickable=True)
         self.card_noise.clicked.connect(self.show_band_noise_dialog)
         self.card_weather = StatCard("Weather", "--°F", "#58a6ff")
 
@@ -4005,7 +4178,7 @@ class POTAPropApp(QMainWindow):
         )
         btn_open_web = msg_box.addButton("Open POTA.app", QMessageBox.ButtonRole.ActionRole)
         btn_select_file = msg_box.addButton("Select POTA Log...", QMessageBox.ButtonRole.ActionRole)
-        btn_continue = msg_box.addButton("Continue with Current Log", QMessageBox.ButtonRole.AcceptRole)
+        msg_box.addButton("Continue with Current Log", QMessageBox.ButtonRole.AcceptRole)
 
         msg_box.exec()
 
@@ -4032,7 +4205,7 @@ class POTAPropApp(QMainWindow):
 
         btn_select_file = msg_box.addButton("Select POTA Log...", QMessageBox.ButtonRole.ActionRole)
 
-        btn_continue = msg_box.addButton("Continue (All Spots = NEW)", QMessageBox.ButtonRole.AcceptRole)
+        msg_box.addButton("Continue (All Spots = NEW)", QMessageBox.ButtonRole.AcceptRole)
 
         msg_box.exec()
 
@@ -4199,34 +4372,52 @@ class POTAPropApp(QMainWindow):
         self._is_fetching = True
         self.btn_fetch.setEnabled(False)
         self.btn_fetch.setText("Fetching...")
-        self.status_bar.showMessage("Fetching live active spots, NOAA space weather & regional lightning...")
+        self.status_bar.showMessage("Fetching live active POTA spots...")
 
-        home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
-        if home_lat is None or home_lon is None:
-            home_lat, home_lon = 38.3125, -81.7083
-
-        self.refresh_weather_display(force_refresh=False)
-        worker = FetchSpotsWorker(home_lat, home_lon)
+        worker = FetchPotaWorker()
         worker.signals.finished.connect(self.on_spots_fetched)
         worker.signals.error.connect(self.on_spots_error)
         self._run_worker(worker)
 
-    def on_spots_fetched(
-        self,
-        spots: List[ActiveSpot],
-        solar_weather: Optional[SolarWeather] = None,
-        lightning_summary: Optional[RegionalLightningSummary] = None,
-    ):
+    def fetch_solar(self):
+        worker = FetchSolarWorker()
+        worker.signals.finished.connect(self.on_solar_fetched)
+        self._run_worker(worker)
+
+    def fetch_lightning(self):
+        home_lat, home_lon = maidenhead_to_latlon(self.current_grid)
+        if home_lat is None or home_lon is None:
+            home_lat, home_lon = 38.3125, -81.7083
+        worker = FetchLightningWorker(home_lat, home_lon)
+        worker.signals.finished.connect(self.on_lightning_fetched)
+        self._run_worker(worker)
+
+    @pyqtSlot(object)
+    def on_solar_fetched(self, solar_weather):
+        if solar_weather is not None:
+            self.solar_weather = solar_weather
+            self.last_swpc_fetch_time = time.time()
+            if hasattr(self, "lbl_status_swpc"):
+                self.update_widget_history(self.lbl_status_swpc, f"SFI: {int(solar_weather.sfi)}, K: {int(solar_weather.k_index)} ({solar_weather.condition})")
+
+    @pyqtSlot(object)
+    def on_lightning_fetched(self, lightning_summary):
+        if lightning_summary is not None:
+            self.lightning_summary = lightning_summary
+            self.last_ltng_fetch_time = time.time()
+            self.update_map_lightning(self.lightning_summary)
+            if hasattr(self, "lbl_status_ltng"):
+                act = lightning_summary.get_activity_level()
+                self.update_widget_history(self.lbl_status_ltng, f"Level {act.level} ({act.label})")
+
+    @pyqtSlot(list)
+    def on_spots_fetched(self, spots: List[ActiveSpot]):
         self._is_fetching = False
+        self.last_pota_fetch_time = time.time()
         self.btn_fetch.setEnabled(True)
         self.btn_fetch.setText("Fetch Spots")
         self.active_spots = spots
-        if solar_weather is not None:
-            self.solar_weather = solar_weather
-        if lightning_summary is not None:
-            self.lightning_summary = lightning_summary
-            self.update_map_lightning(self.lightning_summary)
-            
+        
         # Queue up to 5 digital activators for PSKReporter polling (prioritize VHF/6m)
         import random
         digital_spots = [s for s in spots if str(s.mode).upper() in ("FT8", "FT4", "DIGITAL") and not getattr(s, 'is_qrt', False)]
@@ -4248,11 +4439,8 @@ class POTAPropApp(QMainWindow):
                 added += 1
                 
         self.recompute_comparisons()
-        now_str = datetime.now().strftime("%H:%M:%S")
-        light_act = self.lightning_summary.get_activity_level() if self.lightning_summary else None
-        light_str = f" | Lightning: Level {light_act.level} ({light_act.label})" if light_act else ""
-        msg = f"Updated spots at {now_str} | {len(spots)} spots received | Solar SFI: {int(self.solar_weather.sfi)}, K: {int(self.solar_weather.k_index)} ({self.solar_weather.condition}){light_str}"
-        self.queue_status_message(msg)
+        if hasattr(self, "lbl_status_pota"):
+            self.update_widget_history(self.lbl_status_pota, f"Fetched {len(spots)} active spots")
 
     @pyqtSlot()
     def fetch_psk_spots(self):
@@ -4272,6 +4460,7 @@ class POTAPropApp(QMainWindow):
 
     @pyqtSlot(list, str)
     def on_psk_fetched(self, spots, node):
+        self.last_psk_fetch_time = time.time()
         if spots:
             self.psk_spots.extend(spots)
             
@@ -4300,10 +4489,8 @@ class POTAPropApp(QMainWindow):
             pota_hits = [s for s in spots if s.tx_call.upper() in active_activators]
             hit_count = len(pota_hits)
             
-        if hit_count > 0:
-            self.queue_status_message(f"Receiving background telemetry from array: {node} ({decode_count} total decodes | {hit_count} POTA hits!)")
-        else:
-            self.queue_status_message(f"Receiving background telemetry from array: {node} ({decode_count} total decodes | 0 POTA hits)")
+        if hasattr(self, "lbl_status_pskr"):
+            self.update_widget_history(self.lbl_status_pskr, f"Node {node}: {decode_count} decodes, {hit_count} POTA hits")
 
     @pyqtSlot()
     def process_activator_psk_queue(self):
@@ -4369,10 +4556,6 @@ class POTAPropApp(QMainWindow):
                 
         self.psk_spots = unique_spots
         self.recompute_comparisons()
-        
-        # Notify user subtly
-        activator = spots[0].tx_call
-        self.queue_status_message(f"Last targeted sweep: Verified {len(valid_spots)} regional decodes for {activator} via PSKReporter")
 
     def on_spots_error(self, err_msg: str):
         self._is_fetching = False
@@ -4380,20 +4563,6 @@ class POTAPropApp(QMainWindow):
         self.btn_fetch.setText("Fetch Spots")
         self.status_bar.showMessage(f"Fetch Error: {err_msg}", 5000)
 
-    def queue_status_message(self, msg: str):
-        self.status_queue.append(msg)
-        if not self.status_queue_timer.isActive():
-            self._process_status_queue()
-            self.status_queue_timer.start(5000)
-
-    @pyqtSlot()
-    def _process_status_queue(self):
-        if not self.status_queue:
-            self.status_queue_timer.stop()
-            return
-            
-        msg = self.status_queue.pop(0)
-        self.status_bar.showMessage(msg)
 
     def _on_startup_lightning_tick(self):
         """
@@ -4515,9 +4684,12 @@ class POTAPropApp(QMainWindow):
     def _on_weather_fetched(self, summary: WeatherForecastSummary):
         """Updates the Local Weather stat card value and tooltip HTML upon worker completion."""
         self.weather_summary = summary
+        self.last_wx_fetch_time = time.time()
         if summary and summary.current:
             val_str = f"{int(round(summary.current.temp_f))}°F {summary.current.weather_icon} {summary.current.short_label}"
             self.card_weather.set_value(val_str)
+            if hasattr(self, "lbl_status_wx"):
+                self.update_widget_history(self.lbl_status_wx, f"{int(round(summary.current.temp_f))}°F, {summary.current.short_label}")
             if "Sun" in summary.current.short_label or "Clear" in summary.current.short_label:
                 self.card_weather.set_accent_color("#e3b341")
             elif "Rain" in summary.current.short_label or "Storm" in summary.current.short_label or "Showers" in summary.current.short_label:
@@ -4672,8 +4844,8 @@ class POTAPropApp(QMainWindow):
 
     def recompute_comparisons(self):
         self.compared_spots = compare_active_spots(
-            self.active_spots,
-            self.hunted_parks,
+            spots=self.active_spots,
+            hunted_map=self.hunted_parks,
             home_grid=self.current_grid,
             solar_weather=self.solar_weather,
             p2p_mode=self.p2p_mode,
@@ -4682,9 +4854,30 @@ class POTAPropApp(QMainWindow):
             tx_power_watts=self.tx_power,
             antenna_type=self.antenna_type,
             op_call=self.my_call,
-            psk_spots=getattr(self, 'psk_spots', [])
+            psk_spots=getattr(self, 'psk_spots', []),
+            lightning_summary=self.lightning_summary,
+            fast_mode=True,
+            cache_map=self.spot_cache
         )
         self.regional_matrix = getattr(compare_active_spots, "last_regional_matrix", None)
+
+        # Dispatch heavy math to background thread
+        worker = PhysicsWorker(
+            spots=self.active_spots,
+            hunted_map=self.hunted_parks,
+            home_grid=self.current_grid,
+            solar_weather=self.solar_weather,
+            p2p_mode=self.p2p_mode,
+            p2p_my_park=self.p2p_my_park,
+            p2p_grid=self.current_grid,
+            tx_power_watts=self.tx_power,
+            antenna_type=self.antenna_type,
+            op_call=self.my_call,
+            psk_spots=getattr(self, 'psk_spots', []),
+            lightning_summary=self.lightning_summary
+        )
+        worker.signals.finished.connect(self.on_physics_complete)
+        self._run_worker(worker)
 
         # Update stats
         new_count = sum(1 for c in self.compared_spots if c.is_new and self.get_worked_status(c.spot.reference) is None)
@@ -4704,13 +4897,27 @@ class POTAPropApp(QMainWindow):
         self.card_active.set_value(f"{len(self.compared_spots)}")
 
         # Update Space Weather card
+        from drap_engine import get_drap_haf
+        home_lat, home_lon = maidenhead_to_latlon(self.home_grid)
+        haf_val = get_drap_haf(home_lat, home_lon) if home_lat is not None else 0.0
+        haf_str = f"HAF: {haf_val:.1f}" if haf_val > 0 else "HAF: --"
+
         ov_lbl, ov_col, _ = self.solar_weather.get_overall_assessment()
         flare_str = self.solar_weather.xray_class if self.solar_weather.xray_class else "Normal"
         self.card_solar.set_value(
-            f"SSN: {self.solar_weather.ssn} | SFI: {int(self.solar_weather.sfi)} | A: {int(self.solar_weather.a_index)} | K: {int(self.solar_weather.k_index)} | Flare: {flare_str}"
+            f"SSN: {self.solar_weather.ssn} | SFI: {int(self.solar_weather.sfi)} | A: {int(self.solar_weather.a_index)} | K: {int(self.solar_weather.k_index)} | Flare: {flare_str} | {haf_str}"
         )
         self.card_solar.set_accent_color(ov_col)
-        self.card_solar.setToolTip(self.solar_weather.format_tooltip_html())
+        
+        base_tooltip = self.solar_weather.format_tooltip_html()
+        haf_tooltip = f"<hr style='border: 1px solid #30363d; margin: 8px 0;'>"
+        if haf_val < 0.5:
+            haf_tooltip += f"<div style='font-size: 11px; margin-bottom: 2px;'><span style='color: #79c0ff;'>☀️ Overhead D-RAP (HAF):</span> None</div>"
+            haf_tooltip += f"<div style='color: #8b949e; margin-bottom: 2px; font-size: 11px;'>There is no daytime absorption taking place overhead.</div>"
+        else:
+            haf_tooltip += f"<div style='font-size: 11px; margin-bottom: 2px;'><span style='color: #79c0ff;'>☀️ Overhead D-RAP (HAF):</span> {haf_val:.1f} MHz</div>"
+            haf_tooltip += f"<div style='color: #8b949e; margin-bottom: 2px; font-size: 11px;'>Signals below {haf_val:.1f} MHz will suffer severe daytime absorption overhead.</div>"
+        self.card_solar.setToolTip(base_tooltip.replace("</div>", haf_tooltip + "</div>", 1) if "</div>" in base_tooltip else base_tooltip + haf_tooltip)
 
         # Update Meteor Activity card
         if hasattr(self.solar_weather, 'meteor_activity') and self.solar_weather.meteor_activity:
@@ -4773,29 +4980,114 @@ class POTAPropApp(QMainWindow):
         # Update dynamic mode filter list if new modes appeared
         current_mode = self.combo_mode.currentText()
         all_modes = set(c.spot.mode for c in self.compared_spots if c.spot.mode)
-        default_modes = ["All Modes", "CW", "SSB", "FT8", "FT4", "FM", "AM", "Digital"]
-        for m in sorted(all_modes):
-            if m and m not in default_modes:
-                default_modes.append(m)
+        sorted_modes = sorted(list(all_modes))
+        if "All Modes" not in sorted_modes:
+            sorted_modes.insert(0, "All Modes")
 
-        self.combo_mode.blockSignals(True)
-        self.combo_mode.clear()
-        self.combo_mode.addItems(default_modes)
-        idx = self.combo_mode.findText(current_mode)
-        if idx >= 0:
-            self.combo_mode.setCurrentIndex(idx)
-        else:
-            self.combo_mode.setCurrentIndex(0)
-        self.combo_mode.blockSignals(False)
+        current_items = [self.combo_mode.itemText(i) for i in range(self.combo_mode.count())]
+        if current_items != sorted_modes:
+            self.combo_mode.blockSignals(True)
+            self.combo_mode.clear()
+            self.combo_mode.addItems(sorted_modes)
+            idx = self.combo_mode.findText(current_mode)
+            if idx >= 0:
+                self.combo_mode.setCurrentIndex(idx)
+            else:
+                self.combo_mode.setCurrentIndex(0)
+            self.combo_mode.blockSignals(False)
 
-        # Update spots on map if active (without recalculating 10-minute propagation heatmap, unless it's the very first time spots arrive)
+        # We skip pushing to the map during the fast pass because the scores are dummy cache/pending values.
+        # We will push to the map once the background PhysicsWorker finishes and returns the true RF scores.
+        self.apply_filters()
+
+    @pyqtSlot(list, object)
+    def on_physics_complete(self, compared_spots, regional_matrix):
+        """Called when the background physics thread finishes computing RF scores."""
+        # 1. Update the cache
+        for cs in compared_spots:
+            cache_key = f"{cs.spot.activator}_{cs.spot.reference}_{cs.spot.frequency_khz}"
+            self.spot_cache[cache_key] = cs.propagation
+
+        self.compared_spots = compared_spots
+        self.regional_matrix = regional_matrix
+        
+        # 2. Update table in place instead of a full tear-down/rebuild
+        self._update_table_scores_in_place()
+        
+        # 3. Now that we have the real fully calculated RF physics data, push it to the map
+        # This will redraw the markers AND re-trigger the propagation heat map overlay
+        # using the verified local spotter evidence!
         if (self.map_window and self.map_window.isVisible()) or self.map_server:
             if not getattr(self, '_has_initial_heatmap', False) and len(self.compared_spots) > 0:
                 self.push_all_data_to_map()
             else:
                 self.update_map_spots_only()
+            
+        self.status_bar.showMessage(f"Loaded {len(compared_spots)} active spots with propagated RF scores.", 5000)
 
-        self.apply_filters()
+    def _update_table_scores_in_place(self):
+        """Updates just the Score and Distance cells in the table to avoid scrolling jumps."""
+        # To avoid jumping, we iterate through the existing rows and find the matching ComparedSpot
+        # and just update the item text/colors!
+        
+        # For fast lookup
+        spot_map = {}
+        for cs in self.compared_spots:
+            cache_key = f"{cs.spot.activator}_{cs.spot.reference}_{cs.spot.frequency_khz}"
+            spot_map[cache_key] = cs
+
+        for row in range(self.table.rowCount()):
+            # The full ComparedSpot object was stored in Qt.ItemDataRole.UserRole on the status cell (col 0) during apply_filters
+            item_status = self.table.item(row, 0)
+            if not item_status:
+                continue
+                
+            old_cs = item_status.data(Qt.ItemDataRole.UserRole)
+            if not old_cs or not hasattr(old_cs, 'spot'):
+                continue
+                
+            cache_key = f"{old_cs.spot.activator}_{old_cs.spot.reference}_{old_cs.spot.frequency_khz}"
+            cs = spot_map.get(cache_key)
+            if cs:
+                # Update Score (Column 1)
+                item_score = self.table.item(row, 1)
+                if item_score:
+                    prob = cs.dx_percentage
+                    has_local = cs.has_local_evidence
+                    if prob >= 99:
+                        prob_text = f"{prob} !" if has_local else f"{prob}"
+                        prob_color = "#2ea043"  # Green
+                    elif prob >= 75:
+                        prob_text = f"{prob} +" if has_local else f"{prob}"
+                        prob_color = "#d29922"  # Yellow
+                    elif prob >= 50:
+                        prob_text = f"{prob} +" if has_local else f"{prob}"
+                        prob_color = "#f78166"  # Orange
+                    else:
+                        prob_text = "0" if prob == 0 else f"{prob}"
+                        if has_local and prob > 0: prob_text += " +"
+                        prob_color = "#da3633"  # Red
+
+                    item_score.setText(prob_text)
+                    if hasattr(item_score, 'sort_value'):
+                        item_score.sort_value = float(prob)
+                    item_score.setForeground(QBrush(QColor(prob_color)))
+                    font = item_score.font()
+                    font.setBold(True)
+                    item_score.setFont(font)
+                    item_score.setToolTip(self.build_row_tooltip(cs))
+                
+                # Update Distance (Column 10)
+                item_dist = self.table.item(row, 10)
+                if item_dist:
+                    dist = cs.propagation.distance_miles if cs.propagation and cs.propagation.distance_miles is not None else float('inf')
+                    dist_str = f"{int(dist):,} mi" if dist != float('inf') else "-"
+                    item_dist.setText(dist_str)
+                    if hasattr(item_dist, 'sort_value'):
+                        item_dist.sort_value = float(dist)
+                    
+                # The map popups are updated by update_map_spots_only() so we don't need to do it here
+
 
     def reset_filters(self):
         self.combo_status.setCurrentIndex(0)
@@ -5028,6 +5320,8 @@ class POTAPropApp(QMainWindow):
             )
             if p.qrn_surge_db > 0:
                 lines.append(f"<div style='margin-bottom: 2px; color: #ff7b72;'><b>⚡ Lightning QRN Surge:</b> +{p.qrn_surge_db:.1f} dB (Local Sferic Noise)</div>")
+            if getattr(p, 'drap_loss_db', 0) > 0:
+                lines.append(f"<div style='margin-bottom: 2px; color: #ff7b72;'><b>☀️ D-RAP Attenuation:</b> -{p.drap_loss_db:.1f} dB (Solar Absorption)</div>")
 
         lines.append("</div>")
         return "".join(lines)
@@ -5137,6 +5431,8 @@ class POTAPropApp(QMainWindow):
             item_call.setFont(QFont("", -1, QFont.Weight.Bold))
             item_call.setForeground(QBrush(QColor("#d29922")))
             item_call.setToolTip(row_tooltip)
+            cache_key = f"{cs.spot.activator}_{cs.spot.reference}_{cs.spot.frequency_khz}"
+            item_call.setData(Qt.ItemDataRole.UserRole, cache_key)
 
             # 3: Frequency (numeric sort by kHz)
             item_freq = NumericTableWidgetItem(cs.frequency_mhz_str, cs.spot.frequency_khz)

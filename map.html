@@ -569,7 +569,7 @@
                     mufStr = "<br>Path MUF: " + spot.muf.toFixed(1) + " MHz" + mufDot;
                 }
                 
-                marker.bindPopup("<b>" + spot.call + "</b><br>" + spot.park + "<br>Band: " + spot.band + " | Mode: " + (spot.mode || "Unknown") + "<br>Score: " + scoreStr + mufStr);
+                marker.bindPopup("<b>" + spot.call + "</b><br>" + spot.park + "<br>Freq: " + (spot.freq || spot.band) + " MHz | Mode: " + (spot.mode || "Unknown") + "<br>Score: " + scoreStr + mufStr);
                 markersLayer.addLayer(marker);
             }
         });

@@ -18,6 +18,8 @@ from meteor_engine import MeteorActivity, get_current_meteor_activity
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from drap_engine import get_drap_attenuation
+
 logger = logging.getLogger(__name__)
 
 NOAA_10CM_FLUX_URL = "https://services.swpc.noaa.gov/products/summary/10cm-flux.json"
@@ -433,6 +435,7 @@ class PropagationResult:
     path_loss_db: float = 0.0
     noise_floor_dbw: float = -140.0
     qrn_surge_db: float = 0.0
+    drap_loss_db: float = 0.0
     lightning_summary: Optional[Any] = None
     profile: Optional['IonosphericProfile'] = None
     ray_candidate: Optional['RayHopCandidate'] = None
@@ -2536,6 +2539,10 @@ def calculate_qso_probability(
         aa_loss = 50.0 * lat_factor * hpi_factor * ((10.0 / freq_mhz) ** 2.0)
         l_a += min(60.0, aa_loss)
 
+    # 2c. Real-time NOAA SWPC D-RAP Absorption
+    drap_loss = get_drap_attenuation(mid_lat, mid_lon, freq_mhz)
+    l_a += (drap_loss * primary_mode.hop_count)
+
     # 3. Ground reflection loss L_g for multi-hop paths (e.g. 2F2 = 1 ground bounce ~ 3.0 dB)
     l_g = (primary_mode.hop_count - 1) * 3.0
 
@@ -2741,6 +2748,7 @@ def calculate_qso_probability(
         path_loss_db=total_path_loss_db,
         noise_floor_dbw=round(noise_power_dbw, 1),
         qrn_surge_db=round(qrn_surge_db, 1),
+        drap_loss_db=round(drap_loss, 1),
         lightning_summary=lightning_summary,
         profile=profile,
         ray_candidate=primary_mode,

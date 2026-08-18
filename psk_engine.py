@@ -141,7 +141,7 @@ def fetch_activator_psk_spots(activator_callsign: str, max_age_minutes: int = 30
                         freq_mhz=freq,
                         time_utc=dt
                     ))
-                except (ValueError, KeyError) as e:
+                except (ValueError, KeyError):
                     continue
                     
     except Exception as e:

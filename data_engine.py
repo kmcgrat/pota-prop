@@ -7,7 +7,6 @@ frequency-to-band conversion, and comparing hunted parks against active spots.
 import csv
 import json
 import logging
-import math
 import os
 import re
 import urllib.request
@@ -664,6 +663,8 @@ def compare_active_spots(
     op_call: str = "",
     lightning_summary: Optional[RegionalLightningSummary] = None,
     psk_spots: Optional[List[Any]] = None,
+    fast_mode: bool = False,
+    cache_map: Optional[Dict[str, Any]] = None,
 ) -> List[ComparedSpot]:
     """
     Compares active spots against hunted parks and computes HF/VHF propagation
@@ -742,26 +743,45 @@ def compare_active_spots(
             is_same_park = (normalize_ref(effective_park) == normalize_ref(spot.reference))
 
         # Calculate propagation probability and path metrics
-        target_grid = spot.grid6 or spot.grid4 or None
-        prop = calculate_qso_probability(
-            home_lat=home_lat,
-            home_lon=home_lon,
-            target_lat=spot.latitude,
-            target_lon=spot.longitude,
-            target_grid=target_grid,
-            freq_khz=spot.frequency_khz,
-            band=spot.band,
-            mode=spot.mode,
-            solar_weather=solar_weather,
-            dt_utc=dt_utc,
-            spot_evidence=evidence,
-            tx_power_watts=tx_power_watts,
-            antenna_type=antenna_type,
-            is_same_park=is_same_park,
-            lightning_summary=lightning_summary,
-            regional_matrix=regional_matrix,
-            target_state=extract_state_from_location(spot.location_desc or ""),
-        )
+        if fast_mode:
+            cache_key = f"{spot.activator}_{spot.reference}_{spot.frequency_khz}"
+            if cache_map and cache_key in cache_map:
+                prop = cache_map[cache_key]
+            else:
+                from propagation_engine import PropagationResult
+                prop = PropagationResult(
+                    probability_pct=50,
+                    distance_km=0.0,
+                    distance_miles=0.0,
+                    bearing_deg=0.0,
+                    path_type="Pending",
+                    path_summary="Calculating...",
+                    muf_est_mhz=0.0,
+                    is_grayline=False,
+                    solar_info=solar_weather,
+                    spot_evidence=evidence,
+                )
+        else:
+            target_grid = spot.grid6 or spot.grid4 or None
+            prop = calculate_qso_probability(
+                home_lat=home_lat,
+                home_lon=home_lon,
+                target_lat=spot.latitude,
+                target_lon=spot.longitude,
+                target_grid=target_grid,
+                freq_khz=spot.frequency_khz,
+                band=spot.band,
+                mode=spot.mode,
+                solar_weather=solar_weather,
+                dt_utc=dt_utc,
+                spot_evidence=evidence,
+                tx_power_watts=tx_power_watts,
+                antenna_type=antenna_type,
+                is_same_park=is_same_park,
+                lightning_summary=lightning_summary,
+                regional_matrix=regional_matrix,
+                target_state=extract_state_from_location(spot.location_desc or ""),
+            )
 
         return ComparedSpot(
             spot=spot,
