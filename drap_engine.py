@@ -51,7 +51,7 @@ class DrapEngine:
         url = "https://services.swpc.noaa.gov/text/drap_global_frequencies.txt"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "POTA-Hunter/26.8.17-4 (Amateur Radio Operator Tool)"}
+            headers={"User-Agent": "POTA-Hunter/26.8.17-5 (Amateur Radio Operator Tool)"}
         )
         with urllib.request.urlopen(req, timeout=10) as response:
             if response.status == 200:
