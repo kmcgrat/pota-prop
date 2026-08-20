@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 from map_server import MapServerManager
 from drap_engine import get_drap_status, get_drap_last_sync_time
 
-APP_VERSION = "26.8.17-5"
+APP_VERSION = "26.8.17-6"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -1488,7 +1488,7 @@ class SpotHistoryDialog(QDialog):
             diag.exec()
 
 class CallsignLookupSignals(QObject):
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
 
@@ -1504,10 +1504,10 @@ class CallsignLookupWorker(QRunnable):
             from propagation_engine import CallsignResolver
             resolver = CallsignResolver()
             loc = resolver.lookup_user_callsign(self.callsign)
-            if loc and loc.grid:
-                self.signals.finished.emit(loc.grid)
+            if loc:
+                self.signals.finished.emit(loc)
             else:
-                self.signals.finished.emit("")
+                self.signals.finished.emit(None)
         except Exception as e:
             self.signals.error.emit(str(e))
 
@@ -1736,11 +1736,13 @@ class SettingsDialog(QDialog):
         if self.parent() and hasattr(self.parent(), "threadpool"):
             self.parent().threadpool.start(worker)
 
-    def on_callsign_lookup_finished(self, grid):
-        if grid:
-            self._home_qth_grid = grid
+    def on_callsign_lookup_finished(self, loc):
+        grid_val = getattr(loc, "grid", None) if hasattr(loc, "grid") else (loc if isinstance(loc, str) else "")
+        if grid_val:
+            clean_g = str(grid_val).strip().upper()
+            self._home_qth_grid = clean_g
             if not self.chk_start_p2p.isChecked():
-                self.txt_grid.setText(grid)
+                self.txt_grid.setText(clean_g)
 
     def set_mobile_grid(self):
         from PyQt6.QtWidgets import QInputDialog
@@ -2022,7 +2024,7 @@ class AboutDialog(QDialog):
         features = [
             "• Live POTA spot & respot stream synchronization with evidence parsing",
             "• UN ISO 3166-1/2 POTA country database integration with clean location formatting & DXCC context",
-            "• Hybrid Live Propagation & Weather Map with RainViewer 5-min Doppler radar, Blitzortung lightning & NOAA SWPC Aurora Ovals",
+            "• Interactive Live Propagation & Weather Map with 100W link budget heatmap, RainViewer & NOAA Doppler radar, Blitzortung lightning cluster vectors & NOAA SWPC Aurora Ovals (F4 / F11)",
             "• Full mode support & decoding thresholds (CW, SSB, FT8, FT4, JS8, PSK, FM, AM, Other Digital)",
             "• Live RBN & PSKReporter intelligence for empirical skip-zone and SNR verification",
             "• Multi-layer ionospheric modeling (E, F1, F2), NOAA SWPC D-RAP absorption & multi-hop ray tracing",
@@ -2229,16 +2231,8 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">2. Filtering, Searching, Station Setup & Live Map</h2>
+        <h2 style="color: #58a6ff;">2. Multi-Criteria Filtering, Instant Search & Station Setup</h2>
         <ul>
-            <li><b>Live Interactive Map:</b> Click <b>Live Map</b> to open the high-performance Leaflet propagation map.
-                <ul>
-                    <li><b>Dark Map Mode & Grayline:</b> Toggle Dark Basemap tiles and real-time day/night solar terminator lines.</li>
-                    <li><b>NOAA SWPC Aurora Oval:</b> Check <b>Show Aurora Oval</b> to display live Northern (Borealis) and Southern (Australis) auroral boundaries with dark gray dashed equatorward viewlines and main auroral belts (updated on a 15-minute cadence).</li>
-                    <li><b>Doppler Radar & Storm Tracking:</b> Enable RainViewer global radar, NOAA US composite radar, and Blitzortung lightning cluster vectors.</li>
-                    <li><b>Hybrid Architecture:</b> Uses native Qt6 WebEngine on Linux/Windows, and a local hardware-accelerated HTTP server on Chromebooks.</li>
-                </ul>
-            </li>
             <li><b>Multi-Criteria Filters:</b> Filter spots by Status (<i>All</i>, <i>New</i>, <i>Hunted</i>, <i>Worked</i>, <i>P2P</i>), Score Threshold (<i>All</i>, <i>&ge;25</i>, <i>&ge;50</i>, <i>&ge;75</i>, <i>&ge;99</i>), Band, and Mode (<i>CW</i>, <i>SSB</i>, <i>FT8</i>, <i>FT4</i>, <i>JS8</i>, <i>PSK</i>, <i>FM</i>, <i>AM</i>, <i>Other Digital</i>).</li>
             <li><b>Instant Search:</b> Type any callsign, park reference, park name, state, grid, or comment keyword into the search box for real-time table filtering.</li>
             <li><b>Transmitter Power (Watts):</b> Select your rig's output power (QRP 5W, 10W, 20W, 50W, 100W, 500W, or 1500W Legal Limit). The link budget calculation adjusts transmitter output in dBW and expected receiver SNR accordingly.</li>
@@ -2258,7 +2252,105 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">3. Marking Contacts Off Your List & Community Spotting</h2>
+        <h2 style="color: #58a6ff;">3. Interactive Live Propagation, Space Weather & Doppler Radar Map</h2>
+        <p>The <b>Live Map</b> provides a real-time, hardware-accelerated global visualization of your station's link budget, active activator pins, Doppler weather radar, space weather boundaries, and regional thunderstorm clusters. Click the green <b>Live Map</b> button on the top toolbar, press <b>F4</b>, or select <i>View &rarr; Live Propagation & Weather Map (F4)</i> to launch.</p>
+        
+        <h3 style="color: #7ee787;">1. Floating Propagation Controls HUD:</h3>
+        <p>The floating HUD panel in the top-right corner allows dynamic control over all map layers and filters without obscuring the globe:</p>
+        <ul>
+            <li><b>Collapsible Panel:</b> Click the <b>▼</b> button to collapse the HUD into a compact title bar, freeing up screen real estate for wide-angle map viewing. Click <b>▶</b> to expand it.</li>
+            <li><b>Independent Band & Mode Selectors:</b> Select any amateur band (160m through 70cm) and operating mode (CW, SSB, FT8, FT4, JS8, PSK, FM, AM, Other Digital). The dropdown dynamically displays <b>live active park counts</b> for each band (e.g. <code>20m (45)</code>, <code>40m (28)</code>, <code>All Spots (135 Parks)</code>). Changing the band or mode immediately recalculates the 100W propagation heatmap and filters the active spot pins.</li>
+            <li><b>Heatmap Opacity Slider:</b> Dedicated slider (0.0 to 1.0) on an isolated rendering pane (<code>heatmapPane</code>) allowing you to adjust the transparency of the RF coverage heatmap without dimming basemap vector features, Grayline terminator lines, or storm markers.</li>
+            <li><b>Dark Map Mode Basemap Toggle:</b> Seamlessly switch between clean high-contrast Carto Light and sleek Carto Dark basemaps.</li>
+            <li><b>Native Fullscreen Mode (F11 / Esc / ⛶):</b> Click the <b>⛶</b> button or press <b>F11</b> to enter immersive, borderless fullscreen mode (ideal for dedicated auxiliary station monitors or wall displays). Press <b>Esc</b> or <b>F11</b> to exit.</li>
+            <li><b>Live Update Telemetry Indicator:</b> Displays the real-time UTC timestamp of the latest propagation recalculation (e.g. <code>Last Updated: 14:30 UTC</code>) or <code>Updating... Standby...</code> during background calculation passes.</li>
+        </ul>
+
+        <h3 style="color: #7ee787;">2. Real-Time 100W Propagation Heatmap & Physics Modeling:</h3>
+        <p>POTA Prop continuously computes your station's RF link budget across the entire globe using 1° latitude by 2° longitude Maidenhead sub-square resolution:</p>
+        <ul>
+            <li><b>Physics-Based Multi-Stage Color Scale:</b>
+                <ul>
+                    <li><b style="color: #2ea043;">Green (≥99% / 100%):</b> Exceptional Propagation — path is wide open with robust SNR well above mode decoding thresholds.</li>
+                    <li><b style="color: #d29922;">Yellow / Gold (50%–99%):</b> Good / High Probability — reliable skywave path within favorable MUF window.</li>
+                    <li><b style="color: #f78166;">Orange (25%–50%):</b> Marginal / Elevated Path Loss — weak signals near the receiver noise floor; higher power or directional antennas recommended.</li>
+                    <li><b style="color: #da3633;">Red (&lt;25%):</b> Poor / Closed — path suffers from skip-zone ionospheric penetration, heavy daytime D-layer absorption, or severe attenuation.</li>
+                </ul>
+            </li>
+            <li><b>Interactive Grid Hover Score:</b> Move your mouse cursor anywhere across oceans or continents to read the precise predicted percentage (<code>Propagation Score: XX%</code>) in the HUD footer.</li>
+            <li><b>Lifecycle & Background Recalculation:</b> The heatmap recalculates upon initial map open, instantly whenever you change the band or mode in the HUD, and automatically on a strict <b>10-minute cadence</b> via a non-blocking background worker thread (<code>MapPropagationWorker</code>). Spot pin updates (every 15s) update cleanly without interrupting map interaction.</li>
+        </ul>
+
+        <h3 style="color: #7ee787;">3. Active POTA Spot Pins & Click Diagnostics:</h3>
+        <p>Every active activator on the air is plotted at their park's exact geographic coordinates with interactive vector pins:</p>
+        <ul>
+            <li><b>Two-Dimensional Pin Styling (Score Fill + Hunted Ring):</b>
+                <ul>
+                    <li><b>Interior Fill Color (QSO Score):</b> Circular markers are filled according to predicted QSO score: <span style="color: #2ea043; font-weight: bold;">Green (≥99)</span>, <span style="color: #d29922; font-weight: bold;">Yellow (≥75)</span>, <span style="color: #f78166; font-weight: bold;">Orange (≥50)</span>, and <span style="color: #da3633; font-weight: bold;">Red (&lt;50)</span>.</li>
+                    <li><b style="color: #ffffff;">⚪ Crisp White Border Ring:</b> Marks <b>NEW (Unhunted)</b> parks, immediately drawing your eye to clean references.</li>
+                    <li><b style="color: #f85149;">🔴 Crimson Red Border Ring:</b> Marks <b>WORKED (Already Hunted)</b> parks already logged in your POTA history.</li>
+                </ul>
+            </li>
+            <li><b>Local Verification <code>+</code> Badge:</b> Markers feature a bold white <b><code>+</code></b> symbol if independent third-party spotters in your regional call area or DXCC entity have recently confirmed receiving the activator's signal.</li>
+            <li><b>Activator QRP Power Modeling (⚡):</b>
+                <ul>
+                    <li>The engine automatically performs case-insensitive parsing of QRP announcements (e.g. <code>5W</code>, <code>10W</code>, <code>QRP</code>, <code>KX2</code>, <code>KX3</code>, <code>IC-705</code>, <code>TX-500</code>, <code>/QRP</code>) from activator respots and comments.</li>
+                    <li>Transmitter power is dynamically reduced from the 100W baseline (&Delta;P = &minus;13 dB for 5W, &minus;10 dB for 10W), adjusting received SNR directly against your station's real-time ITU-R P.372 atmospheric noise floor and summer lightning QRN surges.</li>
+                    <li>Displays gold <span style="color: #e3b341; font-weight: bold;">[⚡ QRP 5W]</span> badges in map popups, table rows, and telemetry tooltips.</li>
+                </ul>
+            </li>
+            <li><b>HUD Legend Status Key:</b> The floating HUD features mini preview dots (<span style="color: #c9d1d9;">⚪ New &nbsp;|&nbsp; 🔴 Worked &nbsp;|&nbsp; + Local</span>) for quick reference.</li>
+            <li><b>Interactive Click Popups:</b> Click any spot marker to reveal a detailed diagnostic popup showing:
+                <ul>
+                    <li><b>Activator Callsign, Status & QRP:</b> Callsign (e.g. <code>W1AW/P</code>), <span style="color: #58a6ff; font-weight: bold;">[NEW]</span> or <span style="color: #f85149; font-weight: bold;">[WORKED]</span> status badge, and <span style="color: #e3b341; font-weight: bold;">[⚡ QRP]</span> power tag.</li>
+                    <li><b>Park Reference & Name:</b> Official POTA reference code and park description.</li>
+                    <li><b>Frequency & Mode:</b> Active operating frequency (MHz) and mode.</li>
+                    <li><b>QSO Score:</b> Estimated success probability with <code>+</code> verification badge (e.g. <code>Score: 92+</code>).</li>
+                    <li><b>Path MUF & Color Dot:</b> Estimated Maximum Usable Frequency in MHz with a quick-reference color indicator dot (<span style="color: #2ea043;">● Green &ge; 28 MHz</span>: upper HF open; <span style="color: #d29922;">● Yellow 18–28 MHz</span>: mid-HF open; <span style="color: #da3633;">● Red &lt; 18 MHz</span>: upper HF closed).</li>
+                </ul>
+            </li>
+        </ul>
+
+        <h3 style="color: #7ee787;">4. Dual-Source Live Doppler Weather Radar:</h3>
+        <p>Monitor real-time weather systems and approaching precipitation over your QTH or target parks using two selectable radar engines:</p>
+        <ul>
+            <li><b>RainViewer Global Radar:</b> Seamless worldwide precipitation reflectivity composite layer automatically updated every 10 minutes via the RainViewer Open API. Includes an independent opacity slider (0.0 to 1.0).</li>
+            <li><b>US NOAA / IEM NEXRAD Composite:</b> High-resolution base reflectivity (N0Q) composite radar tiles covering the continental United States from Iowa Environmental Mesonet / NOAA, with an independent opacity slider.</li>
+        </ul>
+
+        <h3 style="color: #7ee787;">5. Day/Night Solar Terminator (Grayline):</h3>
+        <p>Toggle <b>Show Grayline</b> to display real-time astronomical and twilight boundaries with seamless global longitudinal wrapping (-720° to +720°):</p>
+        <ul>
+            <li><b>Solid Black Line:</b> Exact 90° solar zenith angle (sunrise/sunset terminator line).</li>
+            <li><b>Dashed Black Line:</b> 96° solar zenith angle (civil twilight boundary).</li>
+            <li><b>Dashed Gray Line:</b> 84° solar zenith angle (golden hour daylight boundary).</li>
+        </ul>
+
+        <h3 style="color: #7ee787;">6. NOAA SWPC Space Weather Aurora Oval (OVATION Model):</h3>
+        <p>Toggle <b>Show Aurora Oval</b> to render real-time Northern (Aurora Borealis) and Southern (Aurora Australis) auroral boundaries fetched from NOAA SWPC on a 15-minute background cycle:</p>
+        <ul>
+            <li><b>Core Auroral Belts:</b> Rendered in bold dark green polylines indicating primary ionospheric auroral electrojet activity.</li>
+            <li><b>Equatorward Viewlines:</b> Rendered in dark gray dashed polylines showing the southernmost (northern hemisphere) and northernmost (southern hemisphere) boundaries where aurora is visible on the horizon.</li>
+        </ul>
+
+        <h3 style="color: #7ee787;">7. Blitzortung.org Live Lightning Clusters & Storm Velocity Vectors:</h3>
+        <p>Toggle <b>Show Lightning Clusters</b> to view real-time convective thunderstorm cells and severe weather tracking within your 750-mile operating radius:</p>
+        <ul>
+            <li><b>Stationary Storms (<code>⚡</code>):</b> Rendered as a glowing yellow bolt inside a semi-transparent circular boundary for localized or stationary storms.</li>
+            <li><b>Moving Storm Cells (<code>⚡➤</code>):</b> Rendered with an animated directional arrow rotated along the storm cell's exact ground motion heading vector.</li>
+            <li><b>Lightning Cluster Popups:</b> Click any lightning marker to inspect event category (Severe Thunderstorm, Tornado Warning, Marine Warning, Flash Flood), estimated stroke count, storm ground speed (mph), cardinal heading degrees, and active NOAA NWS convective alert warning headlines.</li>
+        </ul>
+
+        <h3 style="color: #7ee787;">8. Hybrid Desktop & Chromebook Architecture:</h3>
+        <p>POTA Prop delivers optimal performance across all computing environments:</p>
+        <ul>
+            <li><b>Standard Desktops (Linux / Windows):</b> Uses embedded Qt6 <code>QWebEngineView</code> with a high-speed bidirectional <code>QWebChannel</code> bridge.</li>
+            <li><b>Chromebooks (ChromeOS Crostini) & Browser Fallback:</b> Automatically starts a secure, multi-threaded local HTTP server (<code>map_server.py</code>) on a random port with tokenized authentication, seamlessly launching in ChromeOS Chrome with full GPU hardware acceleration.</li>
+        </ul>
+
+        <hr style="border: 1px solid #30363d;" />
+
+        <h2 style="color: #58a6ff;">4. Marking Contacts Off Your List & Community Spotting</h2>
         <h3 style="color: #7ee787;">How to Mark a Contact as Worked:</h3>
         <p>When you complete a QSO with an active park, you can update your session tracking:</p>
         <ul>
@@ -2283,7 +2375,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">4. Custom Filter Presets & Quick Shortcuts</h2>
+        <h2 style="color: #58a6ff;">5. Custom Filter Presets & Quick Shortcuts</h2>
         <p>Create tailored operating views to match your equipment and preferences:</p>
         <ul>
             <li><b>Creating Presets:</b> Adjust your filters (e.g. <i>New Only</i> + <i>20m</i> + <i>CW</i> + <i>Score &ge; 50</i>). Click <b>Filter Presets</b> &rarr; <b>Save Current as Preset...</b> and give it a name (e.g., <i>"20m CW Hunt"</i>).</li>
@@ -2294,8 +2386,12 @@ class DocumentationDialog(QDialog):
         <table border="0" cellpadding="5" cellspacing="0" style="color: #c9d1d9; font-size: 13px;">
             <tr><td><b style="color: #58a6ff;">F1</b></td><td>Open About POTA Prop window</td></tr>
             <tr><td><b style="color: #58a6ff;">F2 / Ctrl+H</b></td><td>Open this Documentation & Guide window</td></tr>
+            <tr><td><b style="color: #58a6ff;">F4</b></td><td>Open Live Propagation, Space Weather & Doppler Radar Map</td></tr>
             <tr><td><b style="color: #58a6ff;">F5</b></td><td>Trigger immediate manual spot & weather refresh</td></tr>
             <tr><td><b style="color: #58a6ff;">F6</b></td><td>Open Receiver Band Noise Floor Matrix dialog</td></tr>
+            <tr><td><b style="color: #58a6ff;">F11</b></td><td>Toggle Fullscreen Mode (in Live Map window)</td></tr>
+            <tr><td><b style="color: #58a6ff;">Esc</b></td><td>Exit Fullscreen Mode (in Live Map window)</td></tr>
+            <tr><td><b style="color: #58a6ff;">Ctrl+P</b></td><td>Open Preferences Manager</td></tr>
             <tr><td><b style="color: #58a6ff;">Ctrl+O</b></td><td>Reload / Browse Hunter Log CSV</td></tr>
             <tr><td><b style="color: #58a6ff;">Ctrl+S</b></td><td>Export current table view to CSV</td></tr>
             <tr><td><b style="color: #58a6ff;">Ctrl+Q</b></td><td>Exit Application</td></tr>
@@ -2304,7 +2400,7 @@ class DocumentationDialog(QDialog):
         <br />
         <h1 style="color: #7ee787; font-size: 18px; margin-top: 16px; border-bottom: 2px solid #238636; padding-bottom: 6px;">PART II: PROPAGATION MODELING & TELEMETRY GUIDE</h1>
 
-        <h2 style="color: #58a6ff; margin-top: 14px;">5. QSO Score, Reliability (REL), and The "+" Local Verification Symbol</h2>
+        <h2 style="color: #58a6ff; margin-top: 14px;">6. QSO Score, Reliability (REL), and The "+" Local Verification Symbol</h2>
         <p>POTA Prop calculates an estimated <b>QSO Score</b> (0 to 100+) for every active spot. This score estimates the likelihood of completing a QSO with that activator based on ray-hop geometry, link budget SNR, ionospheric absorption, regional lightning QRN noise, and real-time spotter reports.</p>
         
         <h3 style="color: #7ee787;">What Does the "+" Symbol Mean (e.g. <code>85+</code>)?</h3>
@@ -2317,7 +2413,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">6. Multi-Layer Ionospheric Profiling & Multi-Hop Ray Tracing</h2>
+        <h2 style="color: #58a6ff;">7. Multi-Layer Ionospheric Profiling & Multi-Hop Ray Tracing</h2>
         <p>POTA Prop models how radio waves refract through the ionosphere using standard ionospheric layers and ray geometry:</p>
         
         <h3 style="color: #7ee787;">1. Multi-Layer Ionospheric Profile (E, F1, F2 Layers):</h3>
@@ -2342,7 +2438,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">7. Skip-Zone & Oblique Critical Frequency Calculations</h2>
+        <h2 style="color: #58a6ff;">8. Skip-Zone & Oblique Critical Frequency Calculations</h2>
         <p>Ionospheric propagation depends on whether operating frequencies exceed the oblique critical frequency for a given path distance:</p>
 
         <h3 style="color: #7ee787;">How Skip-Zone Conditions Occur:</h3>
@@ -2358,7 +2454,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">8. Regional Lightning & Convective Threat Engine (Hybrid NWS & Blitzortung Telemetry)</h2>
+        <h2 style="color: #58a6ff;">9. Regional Lightning & Convective Threat Engine (Hybrid NWS & Blitzortung Telemetry)</h2>
         <p>Thunderstorms and lightning static crashes (QRN) create intense wideband noise pulses that degrade receiver signal-to-noise ratios. POTA Prop combines official weather alerts with live stroke telemetry to monitor regional storms and protect station equipment:</p>
 
         <h3 style="color: #7ee787;">1. Hybrid Architecture: Instant Bootstrap & Live WebSocket Telemetry:</h3>
@@ -2450,7 +2546,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">9. Receiver Band Noise Floor Matrix & ITU-R P.372 Modeling (F6)</h2>
+        <h2 style="color: #58a6ff;">10. Receiver Band Noise Floor Matrix & ITU-R P.372 Modeling (F6)</h2>
         <p>A station's ability to copy weak POTA activators depends directly on the receiver noise floor. POTA Prop implements a comprehensive, 11-band noise floor engine modeled after <b>ITU-R P.372-16</b> and real-time environmental telemetry:</p>
 
         <h3 style="color: #7ee787;">1. The Band Noise Dashboard Card & Modal Matrix (F6):</h3>
@@ -2482,7 +2578,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">10. Link Budget, Antenna Elevation Gain & Signal-to-Noise Ratio (SNR)</h2>
+        <h2 style="color: #58a6ff;">11. Link Budget, Antenna Elevation Gain & Signal-to-Noise Ratio (SNR)</h2>
         <p>POTA Prop calculates an RF link budget for every active spot using standard transmission equations:</p>
 
         <h3 style="color: #7ee787;">1. Path Loss Formulation (L<sub>b</sub>):</h3>
@@ -2510,7 +2606,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">11. Space Weather Telemetry: NOAA Solar Flares, PSKReporter & QRT Detection</h2>
+        <h2 style="color: #58a6ff;">12. Space Weather Telemetry: NOAA Solar Flares, PSKReporter & QRT Detection</h2>
         <h3 style="color: #7ee787;">Geomagnetic Indices: Planetary K-Index vs. Planetary A-Index:</h3>
         <ul>
             <li><b>K-Index (0 to 9, 3-Hour Metric):</b> Measures geomagnetic activity. K &le; 2 is quiet; K &ge; 4 indicates disturbed conditions.</li>
@@ -2541,7 +2637,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">12. Tooltip Propagation Outcomes & Telemetry Reference Guide</h2>
+        <h2 style="color: #58a6ff;">13. Tooltip Propagation Outcomes & Telemetry Reference Guide</h2>
         <p>When you hover your mouse over any <b>Score</b> badge or row in the table, POTA Prop displays a diagnostic popup. Below is a reference of the telemetry lines:</p>
         
         <h3 style="color: #7ee787;">Telemetry Elements:</h3>
@@ -2566,7 +2662,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
 
-        <h2 style="color: #58a6ff;">13. Real-time Propagation Summary</h2>
+        <h2 style="color: #58a6ff;">14. Real-time Propagation Summary</h2>
         <p>Click the <b>Propagation Summary</b> button on the bottom action bar to open a dedicated dispatch synthesizing all real-time telemetry into an objective, technical narrative discussion:</p>
         
         <h3 style="color: #7ee787;">Summary Narrative Sections:</h3>
@@ -2584,7 +2680,7 @@ class DocumentationDialog(QDialog):
 
         <hr style="border: 1px solid #30363d;" />
         
-        <h2 style="color: #58a6ff;">14. Open Source License</h2>
+        <h2 style="color: #58a6ff;">15. Open Source License</h2>
         <p>This project is licensed under the <b>GNU General Public License v3.0 (GPLv3)</b>.</p>
         <p>You are free to use, modify, and distribute this software for amateur radio purposes, provided that any derivative works are also open-source and released under the same GPLv3 license.</p>
 
@@ -2882,13 +2978,6 @@ class MapPropagationWorker(QRunnable):
                 return
                 
             freq = self.get_band_freq(self.band)
-            
-            def haversine(lat1, lon1, lat2, lon2):
-                R = 6371.0 # Earth radius in km
-                dlat = math.radians(lat2 - lat1)
-                dlon = math.radians(lon2 - lon1)
-                a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
-                return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
             # Step by 1 degree lat and 2 degrees lon for true Maidenhead grid resolution
             # Aligns perfectly to Maidenhead boundaries
@@ -3378,10 +3467,6 @@ class POTAPropApp(QMainWindow):
         footer_bar = self.create_footer_bar()
         main_layout.addWidget(footer_bar)
 
-        # Compatibility aliases for tests
-        self.lbl_utc_clock_bottom = getattr(self, "lbl_utc_clock_top", None)
-        self.startup_lightning_timer = getattr(self, "lightning_timer", None) or QTimer(self)
-
     def handle_browser_filter_changed(self, band, mode, show_grayline):
         self.on_web_grayline_changed(show_grayline)
         self.on_web_filter_changed(band, mode)
@@ -3461,11 +3546,17 @@ class POTAPropApp(QMainWindow):
                 if getattr(c.propagation, 'ray_mode', '') == 'QRT' or (c.propagation.spot_evidence and c.propagation.spot_evidence.is_qrt):
                     continue
                 has_plus = c.has_local_evidence
+                is_worked = (not c.is_new) or (self.get_worked_status(c.spot.reference) is not None)
+                is_qrp = bool(c.spot_evidence and getattr(c.spot_evidence, "is_qrp", False))
+                qrp_desc = str(getattr(c.spot_evidence, "qrp_desc", "")) if (c.spot_evidence and is_qrp) else ""
                 map_spots.append({
                     "lat": c.spot.latitude,
                     "lon": c.spot.longitude,
                     "score": c.propagation.probability_pct,
                     "has_plus": has_plus,
+                    "is_worked": is_worked,
+                    "is_qrp": is_qrp,
+                    "qrp_desc": qrp_desc,
                     "call": c.spot.activator,
                     "park": f"{c.spot.reference} ({c.spot.park_name})" if c.spot.park_name else c.spot.reference,
                     "band": c.spot.band,
@@ -3717,6 +3808,11 @@ class POTAPropApp(QMainWindow):
         refresh_action.triggered.connect(self.fetch_spots)
         view_menu.addAction(refresh_action)
 
+        map_action = QAction("Live &Propagation && Weather Map", self)
+        map_action.setShortcut(QKeySequence("F4"))
+        map_action.triggered.connect(self.show_map_window)
+        view_menu.addAction(map_action)
+
         view_menu.addSeparator()
 
         autofit_action = QAction("Auto-fit Column Widths", self)
@@ -3775,9 +3871,6 @@ class POTAPropApp(QMainWindow):
     def show_about_dialog(self):
         dlg = AboutDialog(self)
         dlg.exec()
-
-    def show_radar_dialog(self):
-        self.show_map_window()
 
     def show_band_noise_dialog(self):
         h_lat, h_lon = maidenhead_to_latlon(self.current_grid)
@@ -4134,6 +4227,7 @@ class POTAPropApp(QMainWindow):
         # Live Map button
         self.btn_map = QPushButton("Live Map")
         self.btn_map.setStyleSheet("background-color: #238636; color: white; font-weight: bold;")
+        self.btn_map.setToolTip("Open interactive Live Propagation, Space Weather & Doppler Radar Map (F4)")
         self.btn_map.clicked.connect(self.show_map_window)
         layout.addWidget(self.btn_map)
 
@@ -4151,9 +4245,8 @@ class POTAPropApp(QMainWindow):
             # Automatically populate operator callsign and home grid in preferences
             if callsign:
                 clean_call = callsign.strip().upper()
-                if not self.my_call or self.my_call in ("N0CALL", "NONE", "") or self.my_call != clean_call:
-                    self.set_operator_callsign(clean_call)
-                self.status_bar.showMessage(f"Signed in as {clean_call}. Callsign & grid populated in Preferences.", 5000)
+                self.set_operator_callsign(clean_call)
+                self.status_bar.showMessage(f"Signed in as {clean_call}. Location and grid updated in Preferences.", 5000)
             else:
                 self.status_bar.showMessage("Successfully signed in to POTA.", 5000)
 
@@ -4394,72 +4487,6 @@ class POTAPropApp(QMainWindow):
                 f"No local POTA log loaded. Click 'Select POTA Log' or 'Sign In' to sync your data."
             )
 
-    def show_outdated_csv_dialog(self, age_hours: float, mtime: float):
-        msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Icon.Information)
-        msg_box.setWindowTitle("Hunted Parks Log Update Recommended")
-
-        if age_hours >= 48.0:
-            age_days = age_hours / 24.0
-            age_str = f"{age_days:.1f} days"
-        else:
-            age_str = f"{int(round(age_hours))} hours"
-
-        mtime_dt = datetime.fromtimestamp(mtime)
-        mtime_str = mtime_dt.strftime("%Y-%m-%d %H:%M")
-
-        msg_box.setText(f"<b>Hunted Parks Log (hunter_parks.csv) is {age_str} Old</b>")
-        msg_box.setInformativeText(
-            f"Your hunted parks log was last exported on <b>{mtime_str}</b> ({age_str} ago):<br>"
-            f"<code>{self.csv_path}</code><br><br>"
-            "If you have made new POTA contacts since then, your log may not reflect recent hunts. "
-            "To ensure new activator spots are accurately marked as <b>NEW</b> vs. <b>ALREADY HUNTED</b>, "
-            "it is recommended to download a fresh log export:<br><br>"
-            "<b>POTA.app Download Workflow:</b><br>"
-            "1. Log into <b><a href='https://pota.app/#/user/stats'>pota.app</a></b><br>"
-            "2. Navigate to <b>Profile</b> &rarr; <b>My Stats</b><br>"
-            "3. Scroll down to the <b>Hunted Parks</b> table<br>"
-            "4. Click <b>Export CSV</b> to download your fresh <code>hunter_parks.csv</code><br>"
-            "5. Save the file and click <b>Select POTA Log...</b> (or replace your existing file)."
-        )
-        btn_open_web = msg_box.addButton("Open POTA.app", QMessageBox.ButtonRole.ActionRole)
-        btn_select_file = msg_box.addButton("Select POTA Log...", QMessageBox.ButtonRole.ActionRole)
-        msg_box.addButton("Continue with Current Log", QMessageBox.ButtonRole.AcceptRole)
-
-        msg_box.exec()
-
-        if msg_box.clickedButton() == btn_open_web:
-            webbrowser.open("https://pota.app/#/user/stats")
-        elif msg_box.clickedButton() == btn_select_file:
-            self.browse_csv_file()
-
-    def show_missing_csv_dialog(self):
-        msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Icon.Information)
-        msg_box.setWindowTitle("Hunted Parks Log Not Found")
-        msg_box.setText("<b>Hunted Parks Log File (hunter_parks.csv) Not Found</b>")
-        msg_box.setInformativeText(
-            f"The hunted parks CSV log was not found at:<br><code>{self.csv_path}</code><br><br>"
-            "<b>To highlight parks you've already worked vs. NEW unhunted parks:</b><br>"
-            "1. Log into your account on <b><a href='https://pota.app/#/user/stats'>pota.app</a></b><br>"
-            "2. Navigate to <b>Profile</b> &rarr; <b>My Stats</b><br>"
-            "3. Scroll down to the <b>Hunted Parks</b> table<br>"
-            "4. Click <b>Export CSV</b> to download your <code>hunter_parks.csv</code><br>"
-            "5. Save the file and click <b>Select POTA Log...</b> to choose it."
-        )
-        btn_open_web = msg_box.addButton("Open POTA.app", QMessageBox.ButtonRole.ActionRole)
-
-        btn_select_file = msg_box.addButton("Select POTA Log...", QMessageBox.ButtonRole.ActionRole)
-
-        msg_box.addButton("Continue (All Spots = NEW)", QMessageBox.ButtonRole.AcceptRole)
-
-        msg_box.exec()
-
-        if msg_box.clickedButton() == btn_open_web:
-            webbrowser.open("https://pota.app/#/user/stats")
-        elif msg_box.clickedButton() == btn_select_file:
-            self.browse_csv_file()
-
     def browse_csv_file(self):
         start_dir = os.path.dirname(self.csv_path) if os.path.exists(self.csv_path) else os.path.expanduser("~")
         file_path, _ = QFileDialog.getOpenFileName(
@@ -4527,6 +4554,11 @@ class POTAPropApp(QMainWindow):
                     self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
                     if self.lightning_summary:
                         self.update_map_lightning(self.lightning_summary)
+                    if hasattr(self, "map_server") and self.map_server:
+                        self.map_server.update_data("home_lat", h_lat)
+                        self.map_server.update_data("home_lon", h_lon)
+                    if hasattr(self, "map_window") and self.map_window:
+                        self.map_window.set_home_qth(h_lat, h_lon)
                 if hasattr(self, "card_unique_parks"):
                     self.recompute_comparisons()
                 if hasattr(self, "card_weather"):
@@ -4543,16 +4575,15 @@ class POTAPropApp(QMainWindow):
             worker.signals.finished.connect(self.on_callsign_lookup_finished)
             self._run_worker(worker)
 
-    def on_callsign_changed(self):
-        call = self.txt_my_call.text().strip().upper() if hasattr(self, "txt_my_call") else ""
-        self.set_operator_callsign(call)
-
     @pyqtSlot(object)
     def on_callsign_lookup_finished(self, loc):
-        if not loc or not getattr(loc, "grid", None):
+        if not loc:
             return
-        if self.my_call.strip().upper() == loc.callsign.strip().upper():
-            clean_grid = loc.grid.strip().upper()
+        grid_val = getattr(loc, "grid", None) if hasattr(loc, "grid") else (loc if isinstance(loc, str) else "")
+        call_val = getattr(loc, "callsign", "") if hasattr(loc, "callsign") else self.my_call
+        name_val = getattr(loc, "name", "") if hasattr(loc, "name") else ""
+        if grid_val and (not call_val or self.my_call.strip().upper() == str(call_val).strip().upper()):
+            clean_grid = str(grid_val).strip().upper()
             self.home_grid = clean_grid
             settings = QSettings("POTA", "HunterComparator")
             settings.setValue("home_grid", clean_grid)
@@ -4565,14 +4596,19 @@ class POTAPropApp(QMainWindow):
                     self.lightning_summary = reset_lightning_engine_location(h_lat, h_lon)
                     if self.lightning_summary:
                         self.update_map_lightning(self.lightning_summary)
+                    if hasattr(self, "map_server") and self.map_server:
+                        self.map_server.update_data("home_lat", h_lat)
+                        self.map_server.update_data("home_lon", h_lon)
+                    if hasattr(self, "map_window") and self.map_window:
+                        self.map_window.set_home_qth(h_lat, h_lon)
                 if hasattr(self, "card_unique_parks"):
                     self.recompute_comparisons()
                 if hasattr(self, "card_weather"):
                     self.refresh_weather_display(force_refresh=True)
-            name_str = f" ({loc.name})" if loc.name else ""
+            name_str = f" ({name_val})" if name_val else ""
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage(
-                    f"Callsign {loc.callsign} verified -> Home Grid set to {clean_grid}{name_str}"
+                    f"Callsign {call_val or self.my_call} verified -> Home Grid set to {clean_grid}{name_str}", 5000
                 )
 
     def on_grid_changed(self):
@@ -4849,27 +4885,6 @@ class POTAPropApp(QMainWindow):
         self.btn_fetch.setEnabled(True)
         self.btn_fetch.setText("Fetch Spots")
         self.status_bar.showMessage(f"Fetch Error: {err_msg}", 5000)
-
-
-    def _on_startup_lightning_tick(self):
-        """
-        Adaptive startup lightning refresh handler:
-        - Updates lightning telemetry every 5s for the first 30s
-        - Updates lightning telemetry every 10s for the next 30s (seconds 30 to 60)
-        - Stops after 60s, smoothly transitioning to the standard user-configured auto-refresh interval.
-        """
-        elapsed = time.time() - self.startup_lightning_start_time
-        if elapsed < 30.0:
-            if self.startup_lightning_timer.interval() != 5000:
-                self.startup_lightning_timer.setInterval(5000)
-            self.refresh_lightning_display()
-        elif elapsed < 60.0:
-            if self.startup_lightning_timer.interval() != 10000:
-                self.startup_lightning_timer.setInterval(10000)
-            self.refresh_lightning_display()
-        else:
-            self.startup_lightning_timer.stop()
-            self.refresh_lightning_display()
 
     def _check_nws_warnings(self):
         """Checks if the user's location is inside any active NWS warnings and triggers popups."""
@@ -5529,6 +5544,9 @@ class POTAPropApp(QMainWindow):
             else "N/A"
         )
         lines.append(f"<div style='margin-bottom: 2px;'><b>RF Score:</b> <span style='color: {prob_color}; font-weight: bold;'>{prob} ({prob_badge})</span> | <b>Distance:</b> {dist_info}</div>")
+        if cs.spot_evidence and cs.spot_evidence.is_qrp:
+            qrp_label = cs.spot_evidence.qrp_desc or "QRP (Low Power)"
+            lines.append(f"<div style='margin-bottom: 2px;'><b>Activator Power:</b> <span style='color: #e3b341; font-weight: bold;'>⚡ {qrp_label}</span></div>")
         lines.append(f"<div style='margin-bottom: 8px;'><b>Propagation Path:</b> <span style='color: #8b949e;'>{path_sum}</span></div>")
 
         # 4. Nearby Re-spots Section
@@ -5728,7 +5746,10 @@ class POTAPropApp(QMainWindow):
 
             # 2: Park Reference
             # 2: Activator
-            item_call = QTableWidgetItem(cs.spot.activator)
+            act_text = cs.spot.activator
+            if cs.spot_evidence and cs.spot_evidence.is_qrp:
+                act_text += " ⚡"
+            item_call = QTableWidgetItem(act_text)
             item_call.setFont(QFont("", -1, QFont.Weight.Bold))
             item_call.setForeground(QBrush(QColor("#d29922")))
             item_call.setToolTip(row_tooltip)
@@ -6124,10 +6145,18 @@ class POTAPropApp(QMainWindow):
         sorted_regions = sorted(top_regions_dict.items(), key=lambda x: x[1], reverse=True)[:6]
 
         meteor_dict = {}
-        if hasattr(self, "meteor_summary") and self.meteor_summary:
+        meteor_obj = getattr(self.solar_weather, "meteor_activity", None) or getattr(self, "meteor_summary", None)
+        if meteor_obj:
+            active_sh = getattr(meteor_obj, "active_shower", "Sporadic Background")
             meteor_dict = {
-                "active_showers": getattr(self.meteor_summary, "active_showers", []),
-                "peak_zhr": getattr(self.meteor_summary, "peak_zhr", 10),
+                "active_shower": active_sh,
+                "active_showers": [active_sh] if (active_sh and active_sh != "Sporadic Background") else [],
+                "zhr": getattr(meteor_obj, "zhr", 5),
+                "peak_zhr": getattr(meteor_obj, "zhr", 5),
+                "activity_level": getattr(meteor_obj, "activity_level", "Low"),
+                "days_to_peak": getattr(meteor_obj, "days_to_peak", 0),
+                "next_shower_name": getattr(meteor_obj, "next_shower_name", ""),
+                "next_shower_days": getattr(meteor_obj, "next_shower_days", 0),
             }
 
         lightning_dict = {}

@@ -151,12 +151,102 @@ Once the app is running:
    * Click **Sync Log** (or **Sync POTA Data**) to automatically download and sync your hunted parks.
 
 3. **Explore the Live Propagation & Weather Map**:
-   * Click the **Live Propagation & Weather Map** button on the main toolbar.
-   * Filter bands and modes seamlessly synchronized with your table view.
-   * Toggle **Show Grayline** to see real-time day/night solar terminator lines.
-   * Toggle **Show Aurora Oval** to view real-time NOAA SWPC Northern (Borealis) and Southern (Australis) auroral boundaries with dark gray dashed equatorward viewlines and main auroral belts (updated on a 15-minute cadence).
-   * Toggle **Show Lightning Clusters** to see real-time thunderstorm cells with directional motion headings.
-   * Toggle **Doppler Weather Radar** for live RainViewer precipitation sweeps (automatically updating every 5 minutes).
+   * Click the **Live Map** button on the main toolbar, press **F4**, or select *View &rarr; Live Propagation & Weather Map*.
+   * Filter bands and modes dynamically with live active park counts per band.
+   * View the real-time 100W link budget heatmap, hover for exact probability percentages, and toggle dark map mode.
+   * Inspect color-coded activator pins with `+` local verification badges and click popups with Path MUF status dots.
+   * Toggle **RainViewer Global Radar** and **US NOAA NEXRAD Composite** with independent opacity sliders.
+   * Toggle **Show Grayline** for real-time day/night solar terminator lines.
+   * Toggle **Show Aurora Oval** for NOAA SWPC Northern & Southern auroral boundaries.
+   * Toggle **Show Lightning Clusters** for real-time Blitzortung thunderstorm cells with ground speed and motion heading arrows.
+
+---
+
+## 🗺️ Interactive Live Propagation, Space Weather & Doppler Radar Map Guide
+
+The **Live Map** provides a comprehensive, hardware-accelerated global visualization of your station's link budget, active activator pins, Doppler weather radar, space weather boundaries, and regional thunderstorm clusters.
+
+### 1. Launching & Architecture
+* **Quick Launch**: Click the green **Live Map** button on the top toolbar, press **F4**, or select `View -> Live Propagation & Weather Map (F4)`.
+* **Standard Desktops (Linux / Windows)**: Runs natively inside an embedded Qt6 `QWebEngineView` with bidirectional IPC synchronization.
+* **Chromebooks (ChromeOS Crostini) & Browser Fallback**: Automatically serves through a secure, lightweight local HTTP server (`map_server.py`) with tokenized authentication, launching directly in ChromeOS Chrome with full GPU hardware acceleration.
+
+### 2. Floating Propagation Controls HUD
+A collapsible HUD panel is anchored in the top-right corner of the map:
+* **Collapse / Expand (`▼` / `▶`)**: Click the collapse button in the HUD title bar to minimize the controls to a slim header, freeing up viewing area across the globe.
+* **Band Selector with Live Park Counts**: Select any band (160m through 70cm, or All). The dropdown dynamically displays active park counts in real time (e.g. `20m (48)`, `40m (32)`, `All Spots (142 Parks)`).
+* **Mode Selector**: Choose between CW, SSB, FT8, FT4, JS8, PSK, FM, AM, or Other Digital.
+* **Heatmap Opacity Slider**: Adjusts the transparency of the 100W propagation coverage heatmap (0.0 to 1.0) without dimming base geographic features, Grayline polylines, or weather overlays.
+* **Dark Map Mode**: Toggles between high-contrast Carto Light and sleek Carto Dark basemap tiles.
+* **Fullscreen View (`⛶` / F11 / Esc)**: Click the `⛶` button or press **F11** to toggle borderless fullscreen viewing on dedicated station monitors. Press **Esc** to exit.
+* **Telemetry Update Status**: Displays the UTC timestamp of the latest propagation recalculation (e.g. `Last Updated: 14:30 UTC`) or `Updating... Standby...` during recalculation passes.
+
+### 3. Real-Time 100W Propagation Heatmap
+The engine models your station's 100W link budget across the entire globe at 1° latitude by 2° longitude Maidenhead sub-square resolution:
+* **Green (≥99% / 100%)**: Exceptional propagation — robust signal levels well above decoding thresholds.
+* **Yellow / Gold (50%–99%)**: Good / High probability — reliable skywave path within the optimal MUF window.
+* **Orange (25%–50%)**: Marginal path — weak signals near the receiver noise floor.
+* **Red (<25%)**: Poor / Closed — path closed due to skip-zone penetration or severe D-layer attenuation.
+* **Interactive Hover Score**: Hover your mouse over any region or ocean to view the exact calculated percentage (`Propagation Score: XX%`) in the HUD footer.
+* **Recalculation Cadence**: Recalculates on initial map open, instantly on band/mode filter changes, and automatically every 10 minutes in a non-blocking background thread (`MapPropagationWorker`).
+
+### 4. Active Spot Pins & Click Popups
+Every active activator is plotted at their park's exact latitude and longitude with hardware-rendered vector pins:
+* **Two-Dimensional Visual Pin Status**:
+  * **Interior Fill Color (QSO Score)**: Color-coded by predicted QSO score: **Green (≥99)**, **Yellow (≥75)**, **Orange (≥50)**, and **Red (<50)**.
+  * **⚪ Crisp White Border Ring (`.spot-marker-new`)**: Marks **NEW (Unhunted)** parks.
+  * **🔴 Crimson Red Border Ring (`.spot-marker-worked`)**: Marks **WORKED (Already Hunted)** parks in your log.
+* **Local Verification `+` Badge**: Pins display a white `+` inside the circle if fellow operators in your call area or DXCC entity have confirmed hearing the station.
+* **Activator QRP Power Modeling (⚡)**: Automatically parses case-insensitive QRP announcements (`5W`, `10W`, `KX2`, `IC-705`, `/QRP`, etc.) from self-respots and comments, adjusting received SNR against your real-time noise floor and lightning QRN.
+* **HUD Legend Status Key**: Mini dot preview key at the bottom of the floating HUD (`⚪ New | 🔴 Worked | + Local`).
+* **Interactive Popups**: Click any pin to inspect:
+  * **Activator Callsign, Status & QRP**: Callsign (e.g. `W1AW/P`), `[NEW]` / `[WORKED]` badge, and `[⚡ QRP 5W]` tag.
+  * **Park Reference & Name**: Official POTA reference code and park description.
+  * **Operating Frequency (MHz) & Mode**
+  * **Estimated QSO Score** (e.g. `Score: 92+`)
+  * **Path MUF & Color Dot**: Maximum Usable Frequency in MHz with status dot:
+    * 🟢 **Green (≥28 MHz)**: Upper HF wide open up to 10m.
+    * 🟡 **Yellow (18–28 MHz)**: Mid-HF open (15m–20m).
+    * 🔴 **Red (<18 MHz)**: Upper HF closed, lower HF only.
+
+### 5. Dual Live Doppler Weather Radar Overlays
+* **RainViewer Global Radar**: Global composite precipitation reflectivity layer updated every 10 minutes via the RainViewer API, featuring an independent opacity slider.
+* **US NOAA NEXRAD Composite**: High-resolution continental US base reflectivity (N0Q) composite radar tiles from IEM / NOAA with an independent opacity slider.
+
+### 6. Day/Night Grayline & Solar Terminator
+Toggle **Show Grayline** to display real-time twilight boundaries:
+* **Solid Black Line**: 90° solar zenith (sunrise/sunset terminator line).
+* **Dashed Black Line**: 96° solar zenith (civil twilight boundary).
+* **Dashed Gray Line**: 84° solar zenith (golden hour daylight boundary).
+
+### 7. NOAA SWPC Aurora Oval (OVATION Model)
+Toggle **Show Aurora Oval** to display live Northern (Borealis) and Southern (Australis) auroral boundaries:
+* **Core Auroral Belts**: Bold dark green polylines representing primary auroral electrojet activity.
+* **Equatorward Viewlines**: Dark gray dashed polylines showing the southernmost/northernmost boundaries where aurora is visible on the horizon.
+
+### 8. Blitzortung.org Lightning Clusters & Storm Motion Vectors
+Toggle **Show Lightning Clusters** to track regional convective threats within 750 miles:
+* **Stationary Cells (`⚡`)**: Glowing yellow marker in a pulsing circular boundary.
+* **Moving Storm Cells (`⚡➤`)**: Directional arrow rotated along the storm cell's exact ground motion vector.
+* **Cluster Popups**: Click any storm marker to inspect event type (Severe Thunderstorm, Tornado, Marine Warning, Flash Flood), estimated stroke count, ground speed (mph), cardinal heading, and active NOAA NWS warning headlines.
+
+---
+
+## ⌨️ Keyboard Shortcuts Reference
+
+| Key Shortcut | Action | Context |
+| :--- | :--- | :--- |
+| **F1** | Open About POTA Prop dialog | Main Application |
+| **F2 / Ctrl+H** | Open User Guide & Documentation | Main Application |
+| **F4** | Open Live Propagation, Space Weather & Doppler Radar Map | Main Application |
+| **F5** | Trigger immediate manual spot & weather refresh | Main Application |
+| **F6** | Open Receiver Band Noise Floor Matrix dialog (ITU-R P.372) | Main Application |
+| **F11** | Toggle Fullscreen Mode | Live Map Window |
+| **Esc** | Exit Fullscreen Mode | Live Map Window |
+| **Ctrl+P** | Open Preferences Manager | Main Application |
+| **Ctrl+O** | Reload / Browse Hunter Log CSV | Main Application |
+| **Ctrl+S** | Export filtered table view to CSV | Main Application |
+| **Ctrl+Q** | Exit Application | Main Application |
 
 ---
 

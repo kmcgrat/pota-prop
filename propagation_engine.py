@@ -16,13 +16,17 @@ import urllib.request
 from dataclasses import dataclass, field
 from meteor_engine import MeteorActivity, get_current_meteor_activity
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+
+if TYPE_CHECKING:
+    from psk_engine import DigitalSpot
 
 from drap_engine import get_drap_attenuation
 
 logger = logging.getLogger(__name__)
 
 NOAA_10CM_FLUX_URL = "https://services.swpc.noaa.gov/products/summary/10cm-flux.json"
+NOAA_SSN_URL = "https://services.swpc.noaa.gov/text/daily-solar-indices.txt"
 NOAA_K_INDEX_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 NOAA_A_INDEX_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-a-index.json"
 NOAA_GOES_XRAY_URL = "https://services.swpc.noaa.gov/json/goes/primary/xrays-6-hour.json"
@@ -73,14 +77,6 @@ class SolarWeather:
     meteor_activity: Optional[MeteorActivity] = None
     forecast_3day: Optional[SpaceWeather3DayForecast] = None
     outlook_27day: Optional[SpaceWeather27DayOutlook] = None
-
-    @property
-    def storm_condition(self) -> str:
-        return self.condition
-
-    @property
-    def flare_status(self) -> str:
-        return f"{self.xray_class} ({self.radio_blackout_scale})"
 
     def get_ssn_assessment(self) -> Tuple[str, str, str]:
         """Returns assessment for Sunspot Number (SSN)."""
@@ -151,7 +147,7 @@ class SolarWeather:
             return (
                 f"Kp={k} (Active)",
                 "#d29922",
-                "Geomagnetic disturbance active. Polar and trans-auroral paths exhibit signal flutter, rapid fading (QSB), and depressed MUFs.",
+                "Geomagnetic field is active. Minor signal flutter and slight MUF depression possible on trans-polar and high-latitude paths; mid-latitudes generally stable.",
             )
         elif k == 5:
             return (
@@ -231,13 +227,13 @@ class SolarWeather:
             return (
                 f"{self.xray_class} ({self.radio_blackout_scale})",
                 "#ff2a55",
-                "GOES X-Class Solar Flare: Intense X-ray burst causing major D-layer ionization and sudden ionospheric disturbance (SID). Wide-area daylight Shortwave Fadeout.",
+                f"GOES X-Class Solar Flare: Intense X-ray burst ({self.xray_class} / {self.radio_blackout_scale}) causing major D-layer ionization and sudden ionospheric disturbance (SID). Wide-area daylight Shortwave Fadeout.",
             )
         elif cls.startswith("M"):
             return (
                 f"{self.xray_class} ({self.radio_blackout_scale})",
                 "#e06c3a",
-                "GOES M-Class Solar Flare: Moderate solar flare producing localized daylight D-layer absorption and signal attenuation on lower/mid HF bands.",
+                f"GOES M-Class Solar Flare: Elevated solar X-ray flux ({self.xray_class} / {self.radio_blackout_scale}) producing minor-to-moderate daylight D-layer absorption on lower HF (160m–40m) across the sunlit hemisphere. Higher HF (20m–10m) and dark/night paths remain unaffected.",
             )
         elif cls.startswith("C"):
             return (
@@ -253,56 +249,87 @@ class SolarWeather:
             )
 
     def get_overall_assessment(self) -> Tuple[str, str, str]:
-        """Returns (overall_status, hex_color, operational_guidance) synthesizing all parameters."""
+        """Returns (overall_status, hex_color, operational_guidance) synthesizing all parameters accurately."""
         k = self.k_index
         a = self.a_index
         sfi = self.sfi
         cls = self.xray_class.upper()
         hpi = self.aurora_hpi
+        r_scale = self.radio_blackout_scale
 
         forecast_msg = ""
         if self.k_forecast != "N/A":
             try:
                 kf = float(self.k_forecast)
                 if kf >= 7:
-                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index is forecast to reach {kf:.1f} (NOAA G3-G5 Strong/Severe Storm). Expect high signal absorption, severe flutter fading, and depressed MUFs."
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index forecast to reach {kf:.1f} (NOAA G3-G5 Strong/Severe Storm). Expect high signal absorption, severe flutter fading, and depressed MUFs."
                 elif kf >= 6:
-                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index is forecast to reach {kf:.1f} (NOAA G2 Moderate Storm). Expect high-latitude HF degradation spreading to mid-latitudes."
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index forecast to reach {kf:.1f} (NOAA G2 Moderate Storm). Expect high-latitude HF degradation spreading to mid-latitudes."
                 elif kf >= 5:
-                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index is forecast to reach {kf:.1f} (NOAA G1 Minor Storm). Expect degraded high-latitude HF propagation and signal flutter on polar routes."
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index forecast to reach {kf:.1f} (NOAA G1 Minor Storm). Expect degraded high-latitude HF propagation and signal flutter on polar routes."
                 elif kf >= 4:
-                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index is forecast to reach {kf:.1f} (Active). Watch for potential high-latitude flutter and brief noise periods."
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Planetary K-index forecast to reach {kf:.1f} (Active). Watch for potential high-latitude flutter on polar circuits."
                 elif kf >= 3:
-                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Conditions are forecast to remain unsettled near Kp {kf:.1f} with nominal HF propagation."
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Conditions forecast to remain unsettled near Kp {kf:.1f} with nominal HF propagation."
                 else:
-                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Conditions are forecast to remain quiet and stable near Kp {kf:.1f}."
+                    forecast_msg = f"<br/><br/><b>Outlook (Next 24-48 Hours):</b> Conditions forecast to remain quiet and stable near Kp {kf:.1f}."
             except ValueError:
                 pass
 
-        if k >= 6 or a >= 50 or cls.startswith("X") or hpi > 60 or self.radio_blackout_scale.startswith(("R3", "R4", "R5")):
+        # 1. Major Storm / Radio Blackout
+        if k >= 6 or a >= 50 or cls.startswith("X") or hpi > 60 or r_scale.startswith(("R3", "R4", "R5")):
+            causes = []
+            if k >= 6 or a >= 50:
+                causes.append(f"Geomagnetic Storm (Kp {k:.0f}, Ap {a})")
+            if cls.startswith("X") or r_scale.startswith(("R3", "R4", "R5")):
+                causes.append(f"Major Solar Flare ({cls} / {r_scale})")
+            if hpi > 60:
+                causes.append(f"Intense Auroral Power ({hpi:.0f} GW)")
+            cause_str = ", ".join(causes) if causes else "Major Space Weather Event"
             return (
-                "Storm Blackout / Highly Degraded",
+                "Storm Blackout / Degraded HF",
                 "#f85149",
-                f"<b>Current Conditions:</b> A severe space weather event is actively occurring. A major disturbance (such as a Geomagnetic Storm, X-Class Flare, or Intense Auroral Power) is strongly ionizing the lower D-layer while severely depleting the upper F2-layer. You will experience high signal absorption, severe flutter fading, significantly lower maximum usable frequencies (MUFs), and potential total radio blackouts on sunlit or polar circuits.{forecast_msg}",
+                f"<b>Current Conditions:</b> A significant space weather event is in progress ({cause_str}). High signal absorption, flutter fading, and depressed MUFs will impact affected circuits (polar/trans-auroral for geomagnetic storms; sunlit daylight paths for solar flares).{forecast_msg}",
             )
-        elif k >= 4 or a >= 30 or cls.startswith("M") or hpi > 35 or self.radio_blackout_scale.startswith(("R1", "R2")):
+
+        # 2. Active Geomagnetic Field (K >= 4, Ap >= 30, or HPI > 35) with NO major flare
+        if (k >= 4 or a >= 30 or hpi > 35) and not (cls.startswith("M") or r_scale.startswith(("R1", "R2"))):
             return (
-                "Unsettled / Active Storm Disturbance",
+                f"Active Geomagnetic Field (Kp {k:.0f})",
                 "#db6d28",
-                f"<b>Current Conditions:</b> An active space weather disturbance is in progress. Elevated geomagnetic or solar flare activity is actively increasing atmospheric noise and D-layer signal absorption. High-latitude and trans-polar paths are likely experiencing severe flutter fading and elevated path attenuation. Lower HF bands will be particularly noisy and difficult to use.{forecast_msg}",
+                f"<b>Current Conditions:</b> Geomagnetic activity is elevated (Kp {k:.0f}, Ap {a}). High-latitude and polar paths may exhibit signal flutter (QSB) and minor MUF fluctuations. Mid-latitude and equatorial circuits remain largely stable.{forecast_msg}",
             )
-        elif sfi >= 120 and k <= 3 and a <= 15 and hpi <= 20:
+
+        # 3. Elevated Solar Flare Activity (M-Class / R1-R2) with Quiet/Unsettled Geomagnetics (K <= 3)
+        if (cls.startswith("M") or r_scale.startswith(("R1", "R2"))) and k < 4 and a < 30 and hpi <= 35:
+            return (
+                f"Elevated Solar X-Ray ({cls} / {r_scale})",
+                "#d29922",
+                f"<b>Current Conditions:</b> Solar X-ray flux is elevated ({cls} / {r_scale}), causing minor-to-moderate D-layer absorption on the sunlit (daytime) hemisphere, primarily on lower HF (160m–40m). Higher HF bands (20m–10m) and nighttime paths remain open and stable under quiet geomagnetic conditions (Kp {k:.0f}).{forecast_msg}",
+            )
+
+        # 4. Active Geomagnetics AND Elevated Solar Flare Activity simultaneously
+        if (k >= 4 or a >= 30 or hpi > 35) and (cls.startswith("M") or r_scale.startswith(("R1", "R2"))):
+            return (
+                f"Active Field (Kp {k:.0f}) & Flare ({cls})",
+                "#db6d28",
+                f"<b>Current Conditions:</b> Both geomagnetic field (Kp {k:.0f}) and solar X-ray flux ({cls} / {r_scale}) are active. Expect elevated daytime D-layer absorption on lower bands along with some high-latitude flutter on polar paths.{forecast_msg}",
+            )
+
+        # 5. Quiet / Excellent HF Conditions (High SFI + Quiet Geomagnetics)
+        if sfi >= 120 and k <= 2 and a <= 15 and hpi <= 20:
             return (
                 "Quiet / Excellent HF Conditions",
                 "#3fb950",
-                f"<b>Current Conditions:</b> Optimal space weather is occurring right now. High solar flux is strongly ionizing the F2-layer, raising maximum usable frequencies across the globe. Meanwhile, quiet geomagnetic and auroral conditions are keeping signal absorption and background noise extremely low. This combination strongly supports excellent global DX and stable multi-hop propagation.{forecast_msg}",
+                f"<b>Current Conditions:</b> Optimal space weather conditions. Robust solar flux (SFI {int(sfi)} sfu) is driving strong daytime F2 ionization and elevated MUFs, while quiet geomagnetic conditions (Kp {k:.0f}, Ap {a}) keep background noise and signal absorption low across all bands.{forecast_msg}",
             )
-        else:
-            return (
-                "Fair / Moderate Conditions",
-                "#d29922",
-                f"<b>Current Conditions:</b> Moderate HF conditions are currently present. A nominal solar flux is sustaining the standard ionospheric layers with a generally stable auroral boundary. Lower frequency bands may suffer from typical daytime D-layer absorption, but higher bands should consistently support regional and some global DX paths.{forecast_msg}",
-            )
+
+        # 6. Fair / Normal Baseline HF Conditions
+        return (
+            "Normal / Stable HF Conditions",
+            "#7ee787" if sfi >= 100 else "#d29922",
+            f"<b>Current Conditions:</b> Baseline space weather conditions present. Solar flux (SFI {int(sfi)} sfu) sustains standard ionospheric layers with stable geomagnetic conditions (Kp {k:.0f}, Ap {a}). Standard daytime absorption on lower HF with reliable mid-band propagation.{forecast_msg}",
+        )
 
     def format_tooltip_html(self) -> str:
         """Formats a rich HTML tooltip with NOAA SWPC categories, color codes, and explanations."""
@@ -496,11 +523,50 @@ class SpotEvidence:
     has_psk_reporter_decode: bool = False
     regional_boost: int = 0
     regional_summary: str = ""
+    is_qrp: bool = False
+    qrp_watts: Optional[float] = None
+    qrp_desc: str = ""
+
+
+# -------------------------------------------------------------
+# Dynamic Frequency-Dependent Physical Aperture Footprint Radii
+# -------------------------------------------------------------
+BAND_APERTURE_RADIUS_KM: Dict[str, float] = {
+    "160M": 200.0,
+    "80M": 200.0,
+    "60M": 300.0,
+    "40M": 300.0,
+    "30M": 450.0,
+    "20M": 650.0,
+    "17M": 800.0,
+    "15M": 800.0,
+    "12M": 950.0,
+    "10M": 950.0,
+    "6M": 500.0,
+    "2M": 60.0,
+    "70CM": 40.0,
+}
+
+def get_band_aperture_radius_km(band: str) -> float:
+    """Returns the physical ground illumination footprint radius in kilometers for a given band."""
+    return BAND_APERTURE_RADIUS_KM.get(str(band).upper(), 750.0)
+
+
+@dataclass
+class RegionalOpeningCenter:
+    lat: float
+    lon: float
+    band: str
+    mode: str
+    snr: Optional[float]
+    age_min: float
+    is_psk: bool
 
 
 @dataclass
 class RegionalPathMatrix:
     openings: Dict[Tuple[str, str], List[Tuple[float, str, Optional[float], bool]]] = field(default_factory=dict)
+    centers: List[RegionalOpeningCenter] = field(default_factory=list)
 
 
 @dataclass
@@ -1054,7 +1120,50 @@ class CallsignResolver:
                             name=name_val,
                         )
         except Exception as e:
-            logger.debug(f"User callsign lookup error for {call}: {e}")
+            logger.debug(f"User callsign lookup error for {call} on callook: {e}")
+
+        # Secondary fallback: HamDB API (Supports US and Canada / VE)
+        try:
+            url = f"https://api.hamdb.org/v1/{call}/json/pota-hunter"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "POTA-Hunter-Comparator/1.0 (Amateur Radio Operator Lookup)"},
+            )
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                if resp.status == 200:
+                    raw_data = json.loads(resp.read().decode("utf-8"))
+                    h_call = raw_data.get("hamdb", {}).get("callsign", {})
+                    if h_call and h_call.get("call") != "NOT_FOUND":
+                        state_val = h_call.get("state") if h_call.get("state") != "NOT_FOUND" else None
+                        grid_val = h_call.get("grid") if h_call.get("grid") != "NOT_FOUND" else None
+                        lat_val = float(h_call.get("lat")) if h_call.get("lat") and h_call.get("lat") != "NOT_FOUND" else None
+                        lon_val = float(h_call.get("lon")) if h_call.get("lon") and h_call.get("lon") != "NOT_FOUND" else None
+                        first_name = h_call.get("fname", "") if h_call.get("fname") != "NOT_FOUND" else ""
+                        last_name = h_call.get("name", "") if h_call.get("name") != "NOT_FOUND" else ""
+                        name_val = f"{first_name} {last_name}".strip() or None
+
+                        if not grid_val and lat_val is not None and lon_val is not None:
+                            grid_val = latlon_to_maidenhead(lat_val, lon_val)
+
+                        cached = {
+                            "state": state_val,
+                            "grid": grid_val,
+                            "latitude": lat_val,
+                            "longitude": lon_val,
+                            "name": name_val,
+                        }
+                        self.memory_cache[call] = cached
+                        self._save_disk_cache()
+                        return CallsignLocation(
+                            callsign=call,
+                            state=state_val,
+                            grid=grid_val,
+                            latitude=lat_val,
+                            longitude=lon_val,
+                            name=name_val,
+                        )
+        except Exception as e:
+            logger.debug(f"HamDB callsign lookup error for {call}: {e}")
 
         return None
 
@@ -1402,7 +1511,6 @@ def parse_noaa_3day_forecast(text: str, current_sfi: float = 145.0, current_ap: 
         return res
 
     # 1. Parse Day Labels from NOAA Kp breakdown header
-    date_match = re.search(r"NOAA Kp index breakdown\s+([A-Za-z]+ \d+-[A-Za-z]+ \d+)", text)
     header_days = re.findall(r"([A-Za-z]{3}\s+\d{1,2})", text[:1200])
     if len(header_days) >= 3:
         res.days = header_days[:3]
@@ -1627,6 +1735,25 @@ def build_regional_path_matrix(
                     key_country = (band.upper(), tgt_country)
                     matrix.openings.setdefault(key_country, []).append((loc.distance_miles, mode.upper(), None, False))
                 
+                # Register spherical center coordinate for continuous radius calculation
+                s_lat = getattr(spot, "latitude", None)
+                s_lon = getattr(spot, "longitude", None)
+                if s_lat is not None and s_lon is not None:
+                    try:
+                        matrix.centers.append(
+                            RegionalOpeningCenter(
+                                lat=float(s_lat),
+                                lon=float(s_lon),
+                                band=band.upper(),
+                                mode=mode.upper(),
+                                snr=None,
+                                age_min=0.0,
+                                is_psk=False,
+                            )
+                        )
+                    except (ValueError, TypeError):
+                        pass
+                
     return matrix
 
 
@@ -1666,6 +1793,21 @@ def inject_psk_spots(matrix: RegionalPathMatrix, psk_spots: List['DigitalSpot'])
         else: continue
         
         matrix.openings.setdefault((band, grid2), []).append((age, spot.mode, spot.snr, True))
+        
+        # Register spherical center coordinate for continuous radius calculation
+        tx_lat, tx_lon = maidenhead_to_latlon(spot.tx_grid)
+        if tx_lat is not None and tx_lon is not None:
+            matrix.centers.append(
+                RegionalOpeningCenter(
+                    lat=tx_lat,
+                    lon=tx_lon,
+                    band=band.upper(),
+                    mode=str(spot.mode).upper(),
+                    snr=spot.snr,
+                    age_min=age,
+                    is_psk=True,
+                )
+            )
         
     return matrix
 
@@ -1770,10 +1912,29 @@ def parse_spot_evidence(
         r"\b(PSKREPORTER|PSK\s*REPORTER|WSPR|WSPRNET|WSPR\s*DECODE)\b",
         re.IGNORECASE,
     )
+    qrp_general_pattern = re.compile(
+        r"\b(QRP|QRPP|KX[23]|FT-?81[78]|TX-?500|IC-?705|LAB599|TR-?35|QCX|QMX)\b",
+        re.IGNORECASE,
+    )
+    qrp_watts_pattern = re.compile(
+        r"\b(\d+(?:\.\d+)?)\s*(?:W|WATTS?)\b",
+        re.IGNORECASE,
+    )
 
     seen_spotters: Set[str] = set()
     is_qrt = False
     has_psk_reporter_decode = False
+    is_qrp = False
+    qrp_watts = None
+    qrp_desc = ""
+
+    # Check activator callsign suffix
+    if activator_call:
+        clean_act = activator_call.upper().strip()
+        if clean_act.endswith("/QRP") or clean_act.endswith("/QRPP"):
+            is_qrp = True
+            qrp_watts = 5.0
+            qrp_desc = "QRP 5W"
 
     for spot in respots:
         spotter = str(spot.get("spotter") or "").strip()
@@ -1784,6 +1945,42 @@ def parse_spot_evidence(
         if comment:
             if qrt_pattern.search(comment.upper()):
                 is_qrt = True
+                
+            # Check for QRP indicators
+            if qrp_general_pattern.search(comment):
+                is_qrp = True
+                wm = qrp_watts_pattern.search(comment)
+                if wm:
+                    try:
+                        w_val = float(wm.group(1))
+                        if 0.1 <= w_val <= 20.0:
+                            qrp_watts = w_val
+                            qrp_desc = f"QRP {w_val:g}W"
+                    except ValueError:
+                        pass
+                if not qrp_desc:
+                    gm = qrp_general_pattern.search(comment)
+                    matched_kw = gm.group(0).upper() if gm else "QRP"
+                    if "KX" in matched_kw or "81" in matched_kw or "705" in matched_kw or "500" in matched_kw:
+                        qrp_watts = 5.0
+                        qrp_desc = f"{matched_kw} (5W)"
+                    elif "QRPP" in matched_kw:
+                        qrp_watts = 1.0
+                        qrp_desc = "QRPp 1W"
+                    else:
+                        qrp_watts = 5.0
+                        qrp_desc = "QRP 5W"
+            else:
+                wm = qrp_watts_pattern.search(comment)
+                if wm:
+                    try:
+                        w_val = float(wm.group(1))
+                        if 0.1 <= w_val <= 10.0:
+                            is_qrp = True
+                            qrp_watts = w_val
+                            qrp_desc = f"QRP {w_val:g}W"
+                    except ValueError:
+                        pass
 
         # 2. Check if this is an activator self-spot
         spot_is_self = is_self_spot(spotter, activator_call)
@@ -1975,6 +2172,9 @@ def parse_spot_evidence(
         op_land_desc=op_land_desc,
         is_qrt=is_qrt,
         has_psk_reporter_decode=has_psk_reporter_decode,
+        is_qrp=is_qrp,
+        qrp_watts=qrp_watts,
+        qrp_desc=qrp_desc,
     )
 
 
@@ -1987,7 +2187,7 @@ def resolve_antenna_preset(antenna_type: str) -> Dict[str, Any]:
     norm_key = clean.upper().replace("-", "_").replace(" ", "_").replace("/", "_")
     if norm_key in ANTENNA_PRESETS:
         return ANTENNA_PRESETS[norm_key]
-    for k, v in ANTENNA_PRESETS.items():
+    for v in ANTENNA_PRESETS.values():
         if clean.lower() in v["name"].lower() or v["name"].lower() in clean.lower():
             return v
     return ANTENNA_PRESETS["EFHW"]
@@ -2223,9 +2423,10 @@ def compute_ionospheric_profile(
     if aurora_hpi >= 35.0:
         hpi_deplet = (aurora_hpi - 30.0) * 0.008
 
-    if abs(mid_lat) >= 45.0:
-        k_deplet -= 0.06 * max(0.0, k_index - 1.0)
-        hpi_deplet *= 1.5
+    if abs(mid_lat) >= 40.0:
+        mid_lat_scale = min(1.0, (abs(mid_lat) - 40.0) / 20.0)
+        k_deplet -= 0.06 * max(0.0, k_index - 1.0) * mid_lat_scale
+        hpi_deplet *= (1.0 + 0.5 * mid_lat_scale)
         
     total_deplet = k_deplet - hpi_deplet
     # Drop floor to 0.15 for severe storms (enabling complete band washout)
@@ -2492,7 +2693,25 @@ def calculate_qso_probability(
         openings = []
         if target_state:
             openings.extend(regional_matrix.openings.get((band.upper(), target_state), []))
-        if target_grid and len(target_grid) >= 2:
+            
+        # Physical spherical distance check against empirical opening centers
+        if t_lat is not None and t_lon is not None and getattr(regional_matrix, "centers", None):
+            band_upper = band.upper()
+            radius_km = get_band_aperture_radius_km(band)
+            lat_deg_bound = radius_km / 110.0
+            lon_deg_bound = radius_km / max(20.0, 111.0 * math.cos(math.radians(t_lat)))
+            
+            matching_centers = []
+            for c in regional_matrix.centers:
+                if c.band == band_upper:
+                    if abs(t_lat - c.lat) <= lat_deg_bound and abs(t_lon - c.lon) <= lon_deg_bound:
+                        d_km, _ = calculate_distance_and_bearing(t_lat, t_lon, c.lat, c.lon)
+                        if d_km <= radius_km:
+                            matching_centers.append((d_km, c.mode, c.snr, c.is_psk))
+            
+            if matching_centers:
+                openings.extend(matching_centers)
+        elif target_grid and len(target_grid) >= 2:
             openings.extend(regional_matrix.openings.get((band.upper(), target_grid[:2].upper()), []))
             
         if openings:
@@ -2515,32 +2734,43 @@ def calculate_qso_probability(
                     max_snr = max(best_snrs)
                     if target_is_voice:
                         if max_snr >= 0:
-                            regional_boost = 15
+                            base_boost = 15
                             regional_summary = f"{band} path confirmed open by exceptionally strong FT8 ({max_snr}dB SNR)"
                         elif max_snr >= -8:
-                            regional_boost = 5
+                            base_boost = 5
                             regional_summary = f"{band} path confirmed open by moderate FT8 ({max_snr}dB SNR - marginal for Voice)"
                         else:
-                            regional_boost = 0
+                            base_boost = 0
                             regional_summary = ""
                     elif target_is_cw:
                         if max_snr >= -12:
-                            regional_boost = 15
+                            base_boost = 15
                             regional_summary = f"{band} path confirmed open by strong FT8 ({max_snr}dB SNR - good for CW)"
                         elif max_snr >= -18:
-                            regional_boost = 5
+                            base_boost = 5
                             regional_summary = f"{band} path confirmed open by weak FT8 ({max_snr}dB SNR - marginal for CW)"
                         else:
-                            regional_boost = 0
+                            base_boost = 0
                             regional_summary = ""
                 else:
                     # Weak signal evidence without SNR shouldn't optimistically boost Voice/CW
-                    regional_boost = 0
+                    base_boost = 0
                     regional_summary = ""
             else:
-                regional_boost = 15
+                base_boost = 15
                 loc_type = target_state if target_state else (target_grid[:2] if target_grid else "region")
                 regional_summary = f"{band} path to {loc_type} confirmed open by local spotters"
+
+            # Apply smooth continuous distance-decay gradient if spatial coordinates were matched
+            if base_boost > 0 and t_lat is not None and t_lon is not None and getattr(regional_matrix, "centers", None):
+                radius_km = get_band_aperture_radius_km(band)
+                if best_dist <= radius_km:
+                    decay = math.cos(math.pi * best_dist / (2.0 * radius_km)) ** 2
+                    regional_boost = max(0, int(round(base_boost * decay)))
+                else:
+                    regional_boost = 0
+            else:
+                regional_boost = base_boost
                     
     # Inject regional boost into evidence
     if spot_evidence and regional_boost > 0:
@@ -2775,7 +3005,7 @@ def calculate_qso_probability(
 
     # C. Dynamic Antenna Elevation Radiation Pattern Calculation
     # Evaluates antenna gain at the exact takeoff angle solved by the ray tracer
-    db_ant, ant_desc = calculate_antenna_elevation_gain(
+    db_ant, _ = calculate_antenna_elevation_gain(
         antenna_type=actual_ant_key,
         takeoff_angle_deg=primary_mode.takeoff_angle_deg,
         freq_mhz=freq_mhz,
@@ -2807,10 +3037,9 @@ def calculate_qso_probability(
     # 2b. Auroral Absorption (AA) / Polar Cap Absorption
     # Severe particle precipitation in the auroral oval causes intense D-layer absorption at high latitudes
     max_lat = max(abs(home_lat), abs(target_lat), abs(mid_lat))
-    if max_lat >= 50.0 and solar_weather.aurora_hpi > 30.0:
-        # Scale absorption by how far north the path goes and how intense the HPI is
-        # Auroral absorption is roughly inversely proportional to frequency squared (1/f^2)
-        lat_factor = min(1.0, (max_lat - 45.0) / 25.0)  # Max out at 70 deg lat
+    if max_lat >= 48.0 and solar_weather.aurora_hpi > 30.0:
+        # Smooth continuous ramp from 48 deg lat up to 70 deg lat
+        lat_factor = min(1.0, (max_lat - 48.0) / 22.0)
         hpi_factor = min(2.0, (solar_weather.aurora_hpi - 30.0) / 45.0)
         # Base absorption scaler = 50 dB
         aa_loss = 50.0 * lat_factor * hpi_factor * ((10.0 / freq_mhz) ** 2.0)
@@ -2892,12 +3121,22 @@ def calculate_qso_probability(
     pota_activator_offset_db = -2.0  # Activator portable field deployment / compromised ground offset
     flare_offset_db = float(solar_weather.flare_penalty) * 0.4 if daylight_path > 0.05 else 0.0
 
+    # Activator QRP Power Adjustment (baseline in POTA is 100W activator)
+    activator_qrp_offset_db = 0.0
+    if spot_evidence and getattr(spot_evidence, "is_qrp", False) and getattr(spot_evidence, "qrp_watts", None):
+        try:
+            qrp_w = max(0.1, min(100.0, float(spot_evidence.qrp_watts)))
+            activator_qrp_offset_db = 10.0 * math.log10(qrp_w / 100.0)
+        except Exception:
+            activator_qrp_offset_db = 0.0
+
     # Received signal power in dBW
     rx_signal_dbw = (
         tx_power_dbw
         + db_ant
         - total_path_loss_db
         + pota_activator_offset_db
+        + activator_qrp_offset_db
         + flare_offset_db
     )
 
@@ -2911,18 +3150,21 @@ def calculate_qso_probability(
     # Auroral Flutter Fading
     max_lat = max(abs(home_lat), abs(target_lat), abs(mid_lat))
     if solar_weather.k_index >= 4.0 or solar_weather.aurora_hpi >= 40.0:
-        if max_lat >= 45.0:
-            # Rapid multipath fading from auroral boundary irregularities
-            sigma_fading += min(6.0, (solar_weather.aurora_hpi - 30.0) / 10.0 + max(0.0, solar_weather.k_index - 3.0))
+        if max_lat >= 42.0:
+            lat_flutter_scale = min(1.0, (max_lat - 42.0) / 20.0)
+            flutter_add = (solar_weather.aurora_hpi - 30.0) / 10.0 + max(0.0, solar_weather.k_index - 3.0)
+            sigma_fading += min(6.0, flutter_add * lat_flutter_scale)
     snr_margin = snr_db - snr_req_db
     rel_normalized = snr_margin / (math.sqrt(2.0) * sigma_fading)
     raw_rel_pct = 0.5 * (1.0 + math.erf(rel_normalized)) * 100.0
 
     # H. Skip-Zone, E-Screening, & Storm Penalties
-    if is_penetrated and regional_boost == 0:
+    if is_penetrated:
         # Operating frequency exceeds Oblique MUF -> ray penetrates layer into space!
-        # Skip-zone dead-zone cutoff. Bypassed if regional matrix confirms path is open via anomaly!
-        raw_rel_pct = max(0.0, min(12.0, raw_rel_pct * 0.10))
+        # Skip-zone dead-zone cutoff with continuous empirical bypass scaling
+        skip_scale = 0.10 + 0.90 * min(1.0, max(0.0, regional_boost / 15.0))
+        max_floor = 12.0 + 88.0 * min(1.0, max(0.0, regional_boost / 15.0))
+        raw_rel_pct = max(0.0, min(max_floor, raw_rel_pct * skip_scale))
     elif is_screened:
         raw_rel_pct = max(5.0, raw_rel_pct - 25.0)
 
@@ -2938,8 +3180,9 @@ def calculate_qso_probability(
     if a_idx >= 20.0:
         storm_sub += (a_idx - 15.0) * 0.4
     if storm_sub > 0:
-        if abs(mid_lat) >= 48.0:
-            storm_sub *= 1.4
+        if abs(mid_lat) >= 42.0:
+            storm_mid_factor = 1.0 + 0.4 * min(1.0, (abs(mid_lat) - 42.0) / 20.0)
+            storm_sub *= storm_mid_factor
         raw_rel_pct = max(5.0, raw_rel_pct - storm_sub)
 
     # Apply Regional Matrix Boost to the raw score EVEN IF there is no Spot Evidence (e.g. for the Heatmap!)
@@ -3011,6 +3254,8 @@ def calculate_qso_probability(
 
         if qrn_surge_db >= 6.0:
             summary_quality += f" • ⚡ QRN +{qrn_surge_db:.0f}dB"
+        if spot_evidence and getattr(spot_evidence, "is_qrp", False) and getattr(spot_evidence, "qrp_desc", ""):
+            summary_quality += f" • ⚡ {spot_evidence.qrp_desc}"
         if solar_weather.flare_penalty < 0 and daylight_path > 0.05:
             summary_quality += f" • {solar_weather.radio_blackout_scale} ({solar_weather.xray_class})"
 

@@ -8,9 +8,7 @@ live POTA spot distributions—into a cohesive, professional narrative dispatch 
 formatted LLM prompt.
 """
 
-from datetime import datetime, timezone
-import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 
 def generate_propagation_summary(telemetry: Dict[str, Any]) -> str:
@@ -18,7 +16,6 @@ def generate_propagation_summary(telemetry: Dict[str, Any]) -> str:
     Generates a structured, professional narrative dispatch synthesizing
     all real-time telemetry from an international perspective.
     """
-    now_utc = telemetry.get("timestamp") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     grid = telemetry.get("grid") or "Unspecified"
     call = telemetry.get("my_call") or "Operator"
 
@@ -36,7 +33,6 @@ def generate_propagation_summary(telemetry: Dict[str, Any]) -> str:
     a_idx = getattr(solar, "a_index", 7) if solar else 7
     wind_spd = getattr(solar, "solar_wind_speed", 400.0) if solar else 400.0
     wind_dens = getattr(solar, "solar_wind_density", 5.0) if solar else 5.0
-    g_scale = getattr(solar, "geomag_storm_scale", "G0") if solar else "G0"
     r_scale = getattr(solar, "radio_blackout_scale", "R0") if solar else "R0"
 
     lines = []
@@ -117,9 +113,14 @@ def generate_propagation_summary(telemetry: Dict[str, Any]) -> str:
 
     # VHF (6m, 2m)
     vhf_notes = []
-    if meteor and meteor.get("active_showers"):
-        showers_str = ", ".join(meteor.get("active_showers", []))
-        vhf_notes.append(f"Meteor scatter bursts supported by {showers_str} (ZHR ~{meteor.get('peak_zhr', 10)}).")
+    active_sh = meteor.get("active_shower") if isinstance(meteor, dict) else ""
+    if not active_sh and isinstance(meteor, dict):
+        showers_list = meteor.get("active_showers") or []
+        active_sh = showers_list[0] if showers_list else ""
+    zhr_val = meteor.get("zhr") or meteor.get("peak_zhr") or 5 if isinstance(meteor, dict) else 5
+
+    if active_sh and active_sh != "Sporadic Background":
+        vhf_notes.append(f"Meteor scatter bursts enhanced by active {active_sh} shower (ZHR ~{zhr_val}/hr).")
     if kp >= 4.5:
         vhf_notes.append("Elevated Kp indicates potential for 6m/2m auroral backscatter/reflection in sub-polar regions.")
     if not vhf_notes:
@@ -133,7 +134,7 @@ def generate_propagation_summary(telemetry: Dict[str, Any]) -> str:
 
     if forecast_3day and getattr(forecast_3day, "days", None) and len(forecast_3day.days) >= 3:
         d1, d2, d3 = forecast_3day.days[0], forecast_3day.days[1], forecast_3day.days[2]
-        s1, s2, s3 = forecast_3day.sfi_forecast[0], forecast_3day.sfi_forecast[1], forecast_3day.sfi_forecast[2]
+        s1, s2 = forecast_3day.sfi_forecast[0], forecast_3day.sfi_forecast[1]
         ap1, ap2, ap3 = forecast_3day.ap_forecast[0], forecast_3day.ap_forecast[1], forecast_3day.ap_forecast[2]
         k1, k2, k3 = forecast_3day.kp_max_forecast[0], forecast_3day.kp_max_forecast[1], forecast_3day.kp_max_forecast[2]
         m1, m2, m3 = forecast_3day.m_flare_prob[0], forecast_3day.m_flare_prob[1], forecast_3day.m_flare_prob[2]
@@ -179,10 +180,48 @@ def generate_propagation_summary(telemetry: Dict[str, Any]) -> str:
     else:
         lines.append("* AURORAL OVAL: Polar activity remains confined to high geomagnetic latitudes with minimal mid-latitude degradation.")
 
-    if meteor and meteor.get("active_showers"):
-        lines.append(f"* METEORS: Active showers include {', '.join(meteor.get('active_showers', []))} with estimated peak Zenithal Hourly Rate (ZHR) of {meteor.get('peak_zhr', 15)}.")
+    # Meteors & Scatter Outlook
+    from meteor_engine import get_upcoming_meteor_showers, SHOWER_DATABASE
+    upcoming_showers = get_upcoming_meteor_showers(limit=2)
+
+    active_sh = meteor.get("active_shower") if isinstance(meteor, dict) else ""
+    if not active_sh and isinstance(meteor, dict):
+        showers_list = meteor.get("active_showers") or []
+        active_sh = showers_list[0] if showers_list else "Sporadic Background"
+
+    current_zhr = meteor.get("zhr") or meteor.get("peak_zhr") or 5 if isinstance(meteor, dict) else 5
+    act_level = meteor.get("activity_level", "Low") if isinstance(meteor, dict) else "Low"
+    days_peak = meteor.get("days_to_peak", 0) if isinstance(meteor, dict) else 0
+
+    if active_sh and active_sh != "Sporadic Background":
+        if days_peak > 0:
+            status_str = f"approaching annual peak in {days_peak} day(s)"
+        elif days_peak < 0:
+            status_str = f"fading, passed peak {-days_peak} day(s) ago"
+        else:
+            status_str = "PEAKING TODAY"
+
+        info = SHOWER_DATABASE.get(active_sh, {})
+        origin_str = f" ({info['origin']})" if info.get("origin") else ""
+        lines.append(
+            f"* CURRENT METEOR ACTIVITY: {active_sh.upper()} ACTIVE{origin_str}. "
+            f"Estimated Zenithal Hourly Rate (ZHR) ~{current_zhr} meteors/hr ({act_level} Activity, {status_str})."
+        )
+        if current_zhr >= 15:
+            lines.append(
+                f"  Ionized meteor trails support intermittent 10m/6m/2m Meteor Scatter bursts (MSK144 / FT8 / High-Speed CW) over 500-1,400 miles."
+            )
     else:
-        lines.append("* METEORS: Background sporadic meteor flux present with routine early-morning scatter enhancement.")
+        lines.append(
+            f"* CURRENT METEOR ACTIVITY: SPORADIC BACKGROUND DUST (ZHR ~{current_zhr} meteors/hr, Low Activity). "
+            f"Nominal diurnal background with routine early-morning scatter enhancement."
+        )
+
+    if upcoming_showers:
+        upcoming_strs = []
+        for u in upcoming_showers:
+            upcoming_strs.append(f"{u['name']} (Annual Peak: {u['peak_date']}, in {u['days_until_peak']} days, Peak ZHR ~{u['peak_zhr']}/hr)")
+        lines.append(f"* UPCOMING MAJOR METEOR SHOWERS: {'; '.join(upcoming_strs)}.")
     lines.append("")
 
     # --- 4. LOCAL QRN & THUNDERSTORM HAZARDS ---

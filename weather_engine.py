@@ -59,7 +59,7 @@ def degrees_to_cardinal(deg: Optional[float]) -> str:
     if deg is None:
         return ""
     dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-    idx = int(round((deg % 360) / 45.0)) % 8
+    idx = round((deg % 360) / 45.0) % 8
     return dirs[idx]
 
 
@@ -142,11 +142,11 @@ class WeatherForecastSummary:
         if self.current:
             lines.append(
                 f"<div style='font-size: 14px; font-weight: bold; color: #58a6ff; margin-bottom: 4px;'>"
-                f"{self.current.weather_icon} Local Weather: <b>{int(round(self.current.temp_f))}°F</b> · {self.current.weather_desc}</div>"
+                f"{self.current.weather_icon} Local Weather: <b>{round(self.current.temp_f)}°F</b> · {self.current.weather_desc}</div>"
             )
             lines.append(
                 f"<div style='color: #8b949e; margin-bottom: 8px; font-size: 11px;'>"
-                f"Wind: <b>{int(round(self.current.wind_speed_mph))} mph</b> from <b>{self.current.wind_dir_cardinal}</b> ({int(round(self.current.wind_dir_deg))}°) | Humidity: <b>{self.current.humidity_pct}%</b>"
+                f"Wind: <b>{round(self.current.wind_speed_mph)} mph</b> from <b>{self.current.wind_dir_cardinal}</b> ({round(self.current.wind_dir_deg)}°) | Humidity: <b>{self.current.humidity_pct}%</b>"
                 f"</div>"
             )
         else:
@@ -177,11 +177,11 @@ class WeatherForecastSummary:
                 lines.append(
                     f"<tr>"
                     f"<td style='padding: 2px 8px 2px 0; color: #8b949e;'>{item.time_display}</td>"
-                    f"<td style='padding: 2px 8px; color: #7ee787; font-weight: bold;'>{int(round(item.temp_f))}°F</td>"
+                    f"<td style='padding: 2px 8px; color: #7ee787; font-weight: bold;'>{round(item.temp_f)}°F</td>"
                     f"<td style='padding: 2px 8px; color: #58a6ff;'>{item.humidity_pct}%</td>"
                     f"<td style='padding: 2px 8px; color: #79c0ff;'>{item.precip_prob}%</td>"
                     f"<td style='padding: 2px 8px;'>{item.weather_icon} {item.weather_desc}</td>"
-                    f"<td style='padding: 2px 0;'>{int(round(item.wind_speed_mph))} mph {item.wind_dir_cardinal}</td>"
+                    f"<td style='padding: 2px 0;'>{round(item.wind_speed_mph)} mph {item.wind_dir_cardinal}</td>"
                     f"</tr>"
                 )
             lines.append("</table>")
@@ -269,7 +269,7 @@ class WeatherEngine:
         try:
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": "POTA-Hunter/26.8.17-5 (Amateur Radio Operator Tool)"}
+                headers={"User-Agent": "POTA-Hunter/26.8.17-6 (Amateur Radio Operator Tool)"}
             )
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 if response.status == 200:

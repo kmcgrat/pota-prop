@@ -527,7 +527,8 @@ class TestPOTAComparatorGUIHeadless(unittest.TestCase):
         worker.signals.finished.connect(grid_result.append)
         worker.run()
         self.assertEqual(len(grid_result), 1)
-        self.assertEqual(grid_result[0].upper(), "FN31PR")
+        grid_val = grid_result[0].grid if hasattr(grid_result[0], "grid") else grid_result[0]
+        self.assertEqual(str(grid_val).upper(), "FN31PR")
 
         # Test geolocation worker directly (mocking or running if online)
         geo_worker = GeolocationWorker()

@@ -195,3 +195,38 @@ def get_current_meteor_activity(dt_utc: datetime = None) -> MeteorActivity:
         level = "Low"
 
     return MeteorActivity(zhr=current_zhr, activity_level=level, active_shower=active_shower_name, days_to_peak=active_days_to_peak, next_shower_name=next_shower_name, next_shower_days=next_shower_days)
+
+
+def get_upcoming_meteor_showers(limit: int = 3, dt_utc: datetime = None) -> list:
+    """
+    Returns the next upcoming meteor showers sorted by days until peak.
+    Each item contains: name, peak_date, peak_zhr, days_until_peak, and origin.
+    """
+    if dt_utc is None:
+        dt_utc = datetime.now(timezone.utc)
+
+    current_day_of_year = dt_utc.timetuple().tm_yday
+    upcoming = []
+
+    for shower in MAJOR_SHOWERS:
+        try:
+            peak_dt = datetime(dt_utc.year, shower.peak_month, shower.peak_day, tzinfo=timezone.utc)
+            peak_day_of_year = peak_dt.timetuple().tm_yday
+        except ValueError:
+            continue
+
+        days_to_peak_val = peak_day_of_year - current_day_of_year
+        if days_to_peak_val <= 0:
+            days_to_peak_val += 365
+
+        info = SHOWER_DATABASE.get(shower.name, {})
+        upcoming.append({
+            "name": shower.name,
+            "peak_date": info.get("peak_date", f"{shower.peak_month}/{shower.peak_day}"),
+            "peak_zhr": shower.peak_zhr,
+            "days_until_peak": days_to_peak_val,
+            "origin": info.get("origin", "Cometary debris"),
+        })
+
+    upcoming.sort(key=lambda s: s["days_until_peak"])
+    return upcoming[:limit]

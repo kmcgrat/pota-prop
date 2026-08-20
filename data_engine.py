@@ -358,9 +358,6 @@ POTA_PROGRAM_TO_COUNTRY: Dict[str, str] = {
     "ZW": "Zimbabwe",
 }
 
-# Legacy alias for backward compatibility
-POTA_PREFIX_TO_COUNTRY = POTA_PROGRAM_TO_COUNTRY
-
 ITU_CALLSIGN_TO_COUNTRY: Dict[str, str] = {
     # North America
     "AA": "United States", "AB": "United States", "AC": "United States", "AD": "United States",
@@ -539,10 +536,6 @@ class ComparedSpot:
         if self.propagation is not None:
             return self.propagation.probability_pct
         return 0
-
-    @property
-    def dx_percentage_str(self) -> str:
-        return f"{self.dx_percentage}%"
 
     @property
     def display_name(self) -> str:

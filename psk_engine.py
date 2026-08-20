@@ -200,7 +200,6 @@ def get_live_local_rbn_nodes(home_lat: float, home_lon: float, max_distance_mile
     nodes within max_distance_miles of the user's home location.
     Raises an Exception if the network request or parsing fails.
     """
-    import urllib.request
     import re
     from propagation_engine import maidenhead_to_latlon, calculate_distance_and_bearing
     

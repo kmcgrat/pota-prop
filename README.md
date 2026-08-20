@@ -34,17 +34,17 @@ It compares your hunted parks export against active spots on [pota.app](https://
   - **Global 3-Day Thunderstorm Outlook & Seasonal QRN Climatology**: Features global numerical convective modeling (Precipitation %, Thunderstorm probability %, CAPE in $\text{J/kg}$, and static crash severity) and NASA LIS/OTD seasonal lightning transitions.
   - Accessible directly via the **"Propagation Summary"** button on the bottom action bar, with one-click clipboard copying.
 - **Hybrid Live Propagation & Weather Map**:
-  - Visually maps your real-time 100W link budget and QSO probabilities globally across the earth's surface using mathematically modeled 1x2 degree Maidenhead grid squares.
-  - Generates smooth color gradients (Red -> Orange -> Yellow -> Green) mapped directly to your physics engine probabilities.
-  - Features **Propagation Skip Diagrams**: Displays dashed red lines for paths mathematically closed due to skip-zone penetration, and solid green lines for groundwave paths or paths forced open by live empirical network telemetry.
-  - **Live Doppler Weather Radar**: Integrated RainViewer precipitation reflectivity layer automatically fetching updated sweeps every 5 minutes.
-  - **Show Aurora Oval**: Integrates NOAA SWPC OVATION model to render real-time Northern (Aurora Borealis) and Southern (Aurora Australis) auroral boundaries with bold dark green core belts and dashed equatorward viewlines (updated on a 15-minute background cadence).
-  - **Decoupled Opacity Control**: Opacity slider adjusts the propagation heatmap without dimming Grayline or Aurora vector lines.
-  - **Show Lightning Clusters**: Live Blitzortung thunderstorm cluster markers (`⚡` / `⚡➤` with directional motion vectors) displaying real-time cluster strike counts, storm ground speed, movement heading, and NWS convective alert headlines.
+  - **100W Link Budget Heatmap**: Mathematically models real-time 100W link budget and QSO probabilities globally across the earth's surface using 1° latitude × 2° longitude Maidenhead sub-square resolution.
+  - **4-Stage Color Scale & Hover Diagnostics**: Renders smooth gradients (Green ≥99%, Yellow 50–99%, Orange 25–50%, Red <25%) with real-time hover percentage readouts (`Propagation Score: XX%`).
+  - **Floating HUD & Live Park Counts**: Collapsible top-right HUD panel (`▼`/`▶`) with independent Band and Mode filters displaying live active park counts (e.g. `20m (48)`), Dark Map mode toggle, and decoupled Heatmap Opacity slider (0.0 to 1.0) on an isolated layer (`heatmapPane`).
+  - **Active Spot Pins & Path MUF Popups**: Plots active park activators color-coded by QSO score with white `+` local verification badges. Click popups display callsign, park reference/name, frequency, mode, score, and Path MUF (MHz) with color-coded dot status (🟢 ≥28 MHz, 🟡 18–28 MHz, 🔴 <18 MHz).
+  - **Dual Doppler Weather Radar**: Integrated **RainViewer Global Radar** (10-minute API refresh) and **US NOAA NEXRAD Composite** (N0Q) tile layers with independent opacity sliders.
+  - **Show Aurora Oval**: Integrates the NOAA SWPC OVATION model to render real-time Northern (Aurora Borealis) and Southern (Aurora Australis) auroral boundaries with bold dark green core belts and dashed equatorward viewlines (15-minute background cycle).
+  - **Show Grayline**: Real-time solar terminator lines (90° sunset/sunrise line, 96° civil twilight boundary, 84° golden hour transition) with seamless global coordinate wrapping.
+  - **Show Lightning Clusters**: Live Blitzortung thunderstorm cluster markers (`⚡` for stationary, `⚡➤` with directional motion vectors) displaying real-time cluster strike counts, storm ground speed (mph), movement heading, and NWS convective alert headlines.
   - **Hybrid Architecture**: Uses native Qt6 `QWebEngineView` on standard Linux and Windows desktops, and automatically runs a lightweight, secure local HTTP server (`map_server.py`) on Chromebooks (ChromeOS / Crostini) to render in ChromeOS Chrome with full hardware GPU acceleration.
-  - Dedicated **"Live Propagation & Weather Map"** button on the main toolbar for single-click map launching.
-  - Automatically recalculates on a strict 10-minute cycle with filter state tracking independent of table filters.
-  - Fully interactive Leaflet.js map with opacity sliders, filter controls, and native Full-Screen capability (F11 / Esc) for multi-monitor viewing.
+  - **Keyboard Shortcuts & Fullscreen**: Dedicated toolbar button, `View -> Live Propagation & Weather Map` (`F4`), and native borderless Fullscreen capability (**F11** / **Esc** / `⛶`).
+  - **Background Recalculation Lifecycle**: Recalculates upon initial launch, immediately on band/mode filter changes, and automatically on a strict 10-minute cycle via `MapPropagationWorker`.
 - **Preferences & Startup Modes (`Ctrl+P`)**:
   - **Startup Mode Selection**: Set your preferred startup mode—**At Home** (using your callsign's home QTH) or **Start in P2P Mode**.
   - **P2P Field Park & Auto-Grid**: When operating portable, enter your field park reference (e.g. `US-1845`), and POTA Prop automatically looks up and sets your **Grid Location** to that park.
@@ -86,10 +86,46 @@ It compares your hunted parks export against active spots on [pota.app](https://
    - Select your preferred **Startup Mode** (At Home vs. P2P Mode).
    - Select your transmitter power (5W, 100W, 500W, 1500W) and antenna preset (Dipole, Vertical, Beam, etc.) on the main window to tailor the link budget.
 3. **Explore the Live Propagation & Weather Map**:
-   - Click the **Live Propagation & Weather Map** button to open the global interactive map, Doppler weather radar, and lightning clusters.
+   - Click the **Live Map** button on the main toolbar, press **F4**, or select `View -> Live Propagation & Weather Map`.
+   - Filter bands and modes with live active park counts per band.
+   - Inspect color-coded activator pins, `+` local verification badges, and click popups with Path MUF status dot indicators.
+   - Toggle RainViewer Global Radar and US NOAA NEXRAD Composite layers with independent opacity sliders.
+   - Toggle real-time Day/Night Grayline, NOAA SWPC Aurora Ovals, and Blitzortung lightning clusters with storm motion vectors.
 4. **Marking Worked Parks Off Your List**:
    - Made a contact with an active park? Click the **Status** drop-down menu in the table row and select **Mark [WORKED]** (or right-click the row and select *Toggle Worked Status*).
    - The row immediately turns green, and your counters update. Manually worked parks are saved persistently across sessions!
+
+---
+
+## 🗺️ Live Propagation & Weather Map Guide
+
+The **Live Map** provides a real-time, GPU-accelerated global visualization of your station's 100W link budget, active activator pins, Doppler weather radar, space weather boundaries, and regional thunderstorm clusters:
+
+* **Floating Propagation Controls HUD**: Collapsible (`▼`/`▶`) top-right panel for configuring Band and Mode filters (with live active park counts), Heatmap Opacity slider (0.0–1.0 on dedicated `heatmapPane`), Dark Map Mode basemap toggle, and borderless Fullscreen viewing (**F11** / **Esc** / `⛶`).
+* **100W Link Budget Heatmap**: Evaluates global QSO probability at 1° latitude × 2° longitude Maidenhead sub-square resolution with a 4-stage color scale: **Green (≥99%)**, **Yellow/Gold (50%–99%)**, **Orange (25%–50%)**, and **Red (<25%)**. Hover anywhere to view the exact predicted percentage (`Propagation Score: XX%`).
+* **Active Spot Pins & Click Popups**: Plots active park activators with two-dimensional vector pin styling: interior fill colors for predicted QSO score (<span style="color:#2ea043">Green ≥99</span>, <span style="color:#d29922">Yellow ≥75</span>, <span style="color:#f78166">Orange ≥50</span>, <span style="color:#da3633">Red <50</span>), **⚪ Crisp White Border Rings** for NEW (unhunted) parks, and **🔴 Crimson Red Border Rings** for WORKED (already hunted) parks. Pins display a white `+` for local area verification. Popups show callsign, `[NEW]`/`[WORKED]` status, gold `[⚡ QRP 5W]` tags (automatically modeling activator low power), frequency, mode, score, and Path MUF (MHz) with status dots (🟢 ≥28 MHz, 🟡 18–28 MHz, 🔴 <18 MHz).
+* **Dual Doppler Weather Radar**: Integrated **RainViewer Global Radar** (10-minute API refresh) and **US NOAA NEXRAD Composite** (N0Q) tile layers with dedicated opacity sliders.
+* **Solar Terminator & Space Weather**: Real-time Day/Night Grayline (90°/96°/84° solar zenith angles) and NOAA SWPC OVATION Aurora Ovals (core green belts and dashed equatorward viewlines).
+* **Blitzortung Lightning Clusters & Ground Motion Vectors**: Real-time `⚡` (stationary) and `⚡➤` (moving) storm cluster markers with directional motion heading arrows, ground speed (mph), strike totals, and active NWS warning headlines.
+* **Platform Architecture**: Native Qt6 WebEngine on Linux/Windows, and automated hardware-accelerated local HTTP server (`map_server.py`) for Chromebooks (ChromeOS Crostini).
+
+---
+
+## ⌨️ Keyboard Shortcuts Reference
+
+| Shortcut | Action | Context |
+| :--- | :--- | :--- |
+| **F1** | Open About POTA Prop dialog | Main Application |
+| **F2 / Ctrl+H** | Open User Guide & Documentation | Main Application |
+| **F4** | Open Live Propagation, Space Weather & Doppler Radar Map | Main Application |
+| **F5** | Trigger immediate manual spot & weather refresh | Main Application |
+| **F6** | Open Receiver Band Noise Floor Matrix dialog (ITU-R P.372) | Main Application |
+| **F11** | Toggle Fullscreen Mode | Live Map Window |
+| **Esc** | Exit Fullscreen Mode | Live Map Window |
+| **Ctrl+P** | Open Preferences Manager | Main Application |
+| **Ctrl+O** | Reload / Browse Hunter Log CSV | Main Application |
+| **Ctrl+S** | Export filtered table view to CSV | Main Application |
+| **Ctrl+Q** | Exit Application | Main Application |
 
 ---
 

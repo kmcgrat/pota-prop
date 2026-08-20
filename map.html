@@ -27,12 +27,20 @@
         .spot-marker {
             border-radius: 50%;
             border: 2px solid white;
-            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+            box-shadow: 0 0 5px rgba(0,0,0,0.8);
             text-align: center;
             color: white;
             font-weight: bold;
             font-size: 10px;
             line-height: 20px;
+        }
+        .spot-marker-new {
+            border: 2px solid #ffffff !important;
+            box-shadow: 0 0 6px rgba(255, 255, 255, 0.7);
+        }
+        .spot-marker-worked {
+            border: 2px solid #da3633 !important;
+            box-shadow: 0 0 6px rgba(218, 54, 51, 0.7);
         }
         .score-exceptional { background-color: #2ea043; } /* Green */
         .score-high { background-color: #d29922; } /* Yellow */
@@ -80,6 +88,9 @@
 
     var usRadarLayer = null;
     var usRadarOpacity = 0.65;
+
+    // Propagation score lookup for instant O(1) hover readouts
+    var heatmapScoreLookup = {};
 
     // Transparent 1x1 pixel for missing tiles
     var emptyTile = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
@@ -216,6 +227,11 @@
                             '</div>' + // closes US radar sub-block
                             '</div>' + // closes Radar block
                             '<div id="hover-score" style="margin-top: 8px; font-weight: bold; color: #58a6ff; text-align: center; height: 16px;">Hover map for score</div>' +
+                            '<div style="margin-top: 6px; padding-top: 4px; border-top: 1px solid #30363d; font-size: 11px; display: flex; justify-content: space-around; color: #c9d1d9;">' +
+                            '<span><span style="display:inline-block; width:8px; height:8px; border-radius:50%; border:2px solid #ffffff; background-color:#2ea043; vertical-align:middle; margin-right:3px;"></span>New</span>' +
+                            '<span><span style="display:inline-block; width:8px; height:8px; border-radius:50%; border:2px solid #da3633; background-color:#2ea043; vertical-align:middle; margin-right:3px;"></span>Worked</span>' +
+                            '<span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; border:1px solid #fff; background-color:#2ea043; color:white; font-size:8px; font-weight:bold; line-height:10px; text-align:center; vertical-align:middle; margin-right:3px;">+</span>Local</span>' +
+                            '</div>' +
                             '</div>' + // closes controls-content
                             '<div id="last-update" style="margin-top: 8px; padding-top: 6px; padding-bottom: 2px; border-top: 1px solid #30363d; font-size: 11px; color: #8b949e; text-align: center; min-height: 16px; display: block;">Standby...</div>' +
                             '</div>'; // closes controls
@@ -225,6 +241,36 @@
             return div;
         };
         legend.addTo(map);
+
+        // Global mouse movement handler for high-performance instant propagation score lookup
+        map.on('mousemove', function(e) {
+            if (!heatmapScoreLookup) return;
+            var rawLat = e.latlng.lat;
+            var rawLng = e.latlng.lng;
+            
+            // Normalize longitude to [-180, 180]
+            var normLng = ((rawLng + 180) % 360 + 360) % 360 - 180;
+            if (normLng === 180) normLng = -180;
+            
+            var gridLat = Math.floor(rawLat);
+            var gridLon = Math.floor(normLng / 2.0) * 2;
+            
+            var key = gridLat + ',' + gridLon;
+            var score = heatmapScoreLookup[key];
+            var el = document.getElementById('hover-score');
+            if (el) {
+                if (score !== undefined && score !== null) {
+                    el.innerHTML = "Propagation Score: " + score + "%";
+                } else {
+                    el.innerHTML = "Hover map for score";
+                }
+            }
+        });
+
+        map.on('mouseout', function() {
+            var el = document.getElementById('hover-score');
+            if (el) el.innerHTML = "Hover map for score";
+        });
 
         // Initialize QWebChannel bridge if available
         if (typeof QWebChannel !== 'undefined' && typeof qt !== 'undefined' && qt.webChannelTransport) {
@@ -634,15 +680,21 @@
                 }
 
                 var cssClass = getScoreClass(spot.score);
+                var statusClass = spot.is_worked ? 'spot-marker-worked' : 'spot-marker-new';
                 var iconHtml = spot.has_plus ? '<span style="color:white; font-size:11px; font-weight:bold; line-height:14px; display:block; text-align:center;">+</span>' : '';
                 var icon = L.divIcon({
-                    className: 'spot-marker ' + cssClass,
+                    className: 'spot-marker ' + cssClass + ' ' + statusClass,
                     iconSize: [14, 14],
                     html: iconHtml
                 });
 
                 var marker = L.marker([spot.lat, spot.lon], {icon: icon});
                 var scoreStr = spot.has_plus ? spot.score + "+" : spot.score;
+                var statusBadge = spot.is_worked ? 
+                    '<span style="color:#f85149; font-weight:bold; font-size:11px; margin-left:4px;">[WORKED]</span>' : 
+                    '<span style="color:#58a6ff; font-weight:bold; font-size:11px; margin-left:4px;">[NEW]</span>';
+                var qrpBadge = spot.is_qrp ? 
+                    '<span style="color:#e3b341; font-weight:bold; font-size:11px; margin-left:4px;">[⚡ ' + (spot.qrp_desc || 'QRP') + ']</span>' : '';
                 
                 var mufStr = "";
                 if (spot.muf) {
@@ -655,7 +707,7 @@
                     mufStr = "<br>Path MUF: " + spot.muf.toFixed(1) + " MHz" + mufDot;
                 }
                 
-                marker.bindPopup("<b>" + spot.call + "</b><br>" + spot.park + "<br>Freq: " + (spot.freq || spot.band) + " MHz | Mode: " + (spot.mode || "Unknown") + "<br>Score: " + scoreStr + mufStr);
+                marker.bindPopup("<b>" + spot.call + "</b> " + statusBadge + qrpBadge + "<br>" + spot.park + "<br>Freq: " + (spot.freq || spot.band) + " MHz | Mode: " + (spot.mode || "Unknown") + "<br>Score: " + scoreStr + mufStr);
                 markersLayer.addLayer(marker);
             }
         });
@@ -705,11 +757,13 @@
                 return interpolateColor('#da3633', '#f78166', s / 25.0);
             }
             
+            heatmapScoreLookup = {};
             if (data && data.length > 0) {
                 data.forEach(function(pt) {
                     var lat = pt[0];
                     var lon = pt[1];
                     var score = Math.min(100.0, Math.max(0.0, pt[2] * 100.0));
+                    heatmapScoreLookup[lat + ',' + lon] = Math.round(score);
                     
                     var color = getGradientColor(score);
                     
@@ -722,14 +776,6 @@
                             weight: 0,
                             fillColor: color,
                             fillOpacity: 0.8
-                        });
-                        rect.on('mouseover', function(e) {
-                            var el = document.getElementById('hover-score');
-                            if (el) el.innerHTML = "Propagation Score: " + Math.round(score) + "%";
-                        });
-                        rect.on('mouseout', function(e) {
-                            var el = document.getElementById('hover-score');
-                            if (el) el.innerHTML = "Hover map for score";
                         });
                         rect.addTo(gridGroup);
                     });

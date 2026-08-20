@@ -6,7 +6,7 @@ import os
 import secrets
 import time
 import urllib.parse
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal, QUrl, QSettings, Qt, pyqtSlot

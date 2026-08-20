@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 # Operational radius: 750 miles (1,207 km)
 MAX_QRN_RADIUS_MILES = 750.0
-MAX_QRN_RADIUS_KM = 1207.0
 EARTH_RADIUS_KM = 6371.0
 EARTH_RADIUS_MILES = 3958.8
 
@@ -190,7 +189,6 @@ class LightningStrike:
     longitude: float
     distance_miles: float
     bearing_deg: float
-    raw_delay: float = 0.0
 
 
 @dataclass
@@ -937,7 +935,7 @@ class BlitzortungStreamThread(threading.Thread):
             f"Sec-WebSocket-Key: {key}\r\n"
             f"Sec-WebSocket-Version: 13\r\n"
             f"Origin: https://map.blitzortung.org\r\n"
-            f"User-Agent: POTA-Hunter/26.8.17-5\r\n\r\n"
+            f"User-Agent: POTA-Hunter/26.8.17-6\r\n\r\n"
         )
         ssock.sendall(req.encode("utf-8"))
         handshake_resp = ssock.recv(2048)
@@ -1161,7 +1159,7 @@ class LightningEngine:
             req = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": "POTA-Hunter-Propagation-Engine/26.8.17-5",
+                    "User-Agent": "POTA-Hunter-Propagation-Engine/26.8.17-6",
                     "Accept": "application/geo+json",
                 },
             )
@@ -1251,7 +1249,7 @@ class LightningEngine:
         into real-time Blitzortung WebSocket live strike telemetry over a 15-minute warmup window.
         """
         nws_warnings = self._fetch_nws_warnings_if_needed(home_lat, home_lon, timeout=timeout)
-        count_15m, count_30m, count_60m, time_weighted_score = self.strike_buffer.get_strike_counts_and_rate()
+        count_15m, count_30m, count_60m, _ = self.strike_buffer.get_strike_counts_and_rate()
         all_live_strikes = self.strike_buffer.get_all_strikes()
 
         # Calculate exact real strikes within each NWS polygon

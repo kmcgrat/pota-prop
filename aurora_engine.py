@@ -7,11 +7,9 @@ Prediction Center (SWPC) and computes smooth boundary polylines for both Norther
 (Aurora Borealis) and Southern (Aurora Australis) ovals with clear visual separation.
 """
 
-import json
 import logging
-import math
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 import requests
 
 logger = logging.getLogger(__name__)
@@ -41,7 +39,6 @@ def _extract_oval_segments(
     coords: List[List[float]],
     hemisphere: str,
     fringe_threshold: int = 3,
-    core_threshold: int = 25,
 ) -> Tuple[List[List[List[float]]], List[List[List[float]]]]:
     """
     Extracts continuous fringe (dashed equatorward edge) and core (solid definitive peak)
@@ -158,7 +155,7 @@ def fetch_ovation_aurora_lines(force_refresh: bool = False) -> List[Dict]:
         lines: List[Dict] = []
         
         # 1. Northern Hemisphere (Aurora Borealis)
-        n_fringe, n_core = _extract_oval_segments(coords, hemisphere="north", fringe_threshold=3, core_threshold=25)
+        n_fringe, n_core = _extract_oval_segments(coords, hemisphere="north", fringe_threshold=3)
         
         if n_fringe:
             lines.append({
@@ -174,7 +171,7 @@ def fetch_ovation_aurora_lines(force_refresh: bool = False) -> List[Dict]:
             })
             
         # 2. Southern Hemisphere (Aurora Australis)
-        s_fringe, s_core = _extract_oval_segments(coords, hemisphere="south", fringe_threshold=3, core_threshold=25)
+        s_fringe, s_core = _extract_oval_segments(coords, hemisphere="south", fringe_threshold=3)
         
         if s_fringe:
             lines.append({
