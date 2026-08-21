@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 from map_server import MapServerManager
 from drap_engine import get_drap_status, get_drap_last_sync_time
 
-APP_VERSION = "26.8.17-7"
+APP_VERSION = "26.8.17-8"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -3027,8 +3027,10 @@ class HeatmapCacheService(QThread):
                 futures = {}
                 low_mem = getattr(self.parent_app, 'low_memory_mode', False)
                 try:
+                    import multiprocessing
+                    ctx = multiprocessing.get_context('spawn')
                     workers = 1 if low_mem else min(5, os.cpu_count() or 4)
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as executor:
                         for mode in self.modes_to_cache:
                             mapping = {
                                 "160m": 1850.0, "80m": 3900.0, "60m": 5357.0, "40m": 7200.0,
@@ -3364,7 +3366,8 @@ class POTAPropApp(QMainWindow):
         self.home_grid = str(settings.value("home_grid", DEFAULT_HOME_GRID)).strip().upper() or DEFAULT_HOME_GRID
         self.current_grid = self.home_grid
         self.show_tooltips = settings.value("show_tooltips", True, type=bool)
-        self.low_memory_mode = settings.value("low_memory_mode", False, type=bool)
+        val = settings.value("low_memory_mode", False)
+        self.low_memory_mode = (str(val).lower() == 'true') if isinstance(val, str) else bool(val)
         self.p2p_mode = settings.value("p2p_mode", False, type=bool)
         self.p2p_my_park = str(settings.value("p2p_my_park", "")).strip().upper()
         self.p2p_my_park_name = ""
