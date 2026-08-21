@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 from map_server import MapServerManager
 from drap_engine import get_drap_status, get_drap_last_sync_time
 
-APP_VERSION = "26.8.17-6"
+APP_VERSION = "26.8.17-7"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -112,6 +112,7 @@ from PyQt6.QtCore import (
     Qt,
     QUrl,
     QThreadPool,
+    QThread,
     QTimer,
     pyqtSignal,
     pyqtSlot,
@@ -1647,6 +1648,10 @@ class SettingsDialog(QDialog):
             self.combo_map_mode.setCurrentIndex(mode_idx)
         form_layout.addRow("Map Display Mode:", self.combo_map_mode)
         
+        self.chk_low_mem = QCheckBox("Enable Low RAM Mode (Throttles background maps)")
+        self.chk_low_mem.setChecked(getattr(parent, 'low_memory_mode', False) if parent else False)
+        form_layout.addRow("Performance:", self.chk_low_mem)
+        
         self.txt_rbn.textChanged.connect(self._update_distances)
         self.txt_grid.textChanged.connect(self._update_distances)
         self.txt_call.editingFinished.connect(self.on_callsign_editing_finished)
@@ -2941,6 +2946,133 @@ class SpotDialog(QDialog):
         }
 
 
+import concurrent.futures
+
+class HeatmapCacheService(QThread):
+    status_updated = pyqtSignal(str, str, str) # text, tooltip, color
+    cache_ready = pyqtSignal(str, str, str) # band, mode, json_data
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.heatmap_cache = {} # (band, mode) -> json_data
+        self.running = True
+        self.parent_app = parent
+        
+        self.bands_to_cache = ["20m", "40m", "17m", "15m", "10m", "80m", "60m", "30m", "12m", "6m", "160m"]
+        self.modes_to_cache = ["SSB", "CW", "FT8", "DATA"]
+        
+        self.current_updating_band = None
+        self.last_update_time = 0.0
+        
+    def _get_tooltip(self):
+        lines = []
+        for b in self.bands_to_cache:
+            if b == self.current_updating_band:
+                lines.append(f"<span style='color:#7ee787'>{b}: Updating...</span>")
+            elif (b, "SSB") in self.heatmap_cache:
+                lines.append(f"<span style='color:#8b949e'>{b}: Ready</span>")
+            else:
+                lines.append(f"<span style='color:#f85149'>{b}: Waiting</span>")
+        return "<br>".join(lines)
+        
+    def _emit_status(self, text):
+        color = "#7ee787" # Green default
+        if self.current_updating_band is None:
+            if self.last_update_time == 0.0:
+                color = "#8b949e" # Grey while waiting 60s
+            else:
+                elapsed = time.time() - self.last_update_time
+                if elapsed > 1800: # 30 mins
+                    color = "#f85149" # Red
+                elif elapsed > 900: # 15 mins
+                    color = "#d29922" # Yellow
+        self.status_updated.emit(text, self._get_tooltip(), color)
+        
+    def run(self):
+        # Wait 60 seconds after startup as requested by the user
+        self._emit_status("Maps: Gathering data... (waiting 1m)")
+        for _ in range(60):
+            if not self.running:
+                return
+            time.sleep(1.0)
+            
+        from propagation_engine import calculate_heatmap_matrix_mp
+        
+        while self.running:
+            for band in self.bands_to_cache:
+                start_time = time.time()
+                self.current_updating_band = band
+                self._emit_status(f"Maps: Updating {band}...")
+                
+                # Fetch inputs safely from main window
+                from propagation_engine import maidenhead_to_latlon
+                current_grid = getattr(self.parent_app, 'current_grid', "")
+                home_lat, home_lon = 0.0, 0.0
+                if current_grid:
+                    h_lat, h_lon = maidenhead_to_latlon(current_grid)
+                    if h_lat is not None and h_lon is not None:
+                        home_lat, home_lon = h_lat, h_lon
+                        
+                tx_power = getattr(self.parent_app, 'tx_power', 100.0)
+                antenna_type = getattr(self.parent_app, 'antenna_type', 'dipole')
+                solar_weather = getattr(self.parent_app, 'solar_weather', None)
+                lightning = getattr(self.parent_app, 'lightning_summary', None)
+                regional_matrix = getattr(self.parent_app, 'regional_matrix', None)
+                
+                if not home_lat or not home_lon or not solar_weather:
+                    time.sleep(5)
+                    continue
+
+                # Run multiprocessing for all modes of this band
+                futures = {}
+                low_mem = getattr(self.parent_app, 'low_memory_mode', False)
+                try:
+                    workers = 1 if low_mem else min(5, os.cpu_count() or 4)
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                        for mode in self.modes_to_cache:
+                            mapping = {
+                                "160m": 1850.0, "80m": 3900.0, "60m": 5357.0, "40m": 7200.0,
+                                "30m": 10120.0, "20m": 14200.0, "17m": 18100.0, "15m": 21300.0,
+                                "12m": 24900.0, "10m": 28500.0, "6m": 50150.0
+                            }
+                            freq = mapping.get(band, 14200.0)
+                            f = executor.submit(
+                                calculate_heatmap_matrix_mp,
+                                home_lat, home_lon, band, mode, freq,
+                                solar_weather, tx_power, antenna_type, lightning, regional_matrix
+                            )
+                            futures[f] = mode
+                            
+                        for f in concurrent.futures.as_completed(futures):
+                            if not self.running:
+                                break
+                            mode = futures[f]
+                            try:
+                                json_data = f.result()
+                                self.heatmap_cache[(band, mode)] = json_data
+                                self.cache_ready.emit(band, mode, json_data)
+                            except Exception as e:
+                                logging.error(f"Error caching {band} {mode}: {e}")
+                except Exception as e:
+                    logging.error(f"ProcessPoolExecutor failed: {e}")
+                
+                if not self.running:
+                    break
+                    
+                self.current_updating_band = None
+                self.last_update_time = time.time()
+                self._emit_status(f"Maps: < 1m")
+                
+                # Space out bands by 1 minute (or 15 mins in low memory mode)
+                sleep_time = 900 if low_mem else 60
+                for _ in range(sleep_time):
+                    if not self.running:
+                        break
+                    time.sleep(1.0)
+                    
+    def stop(self):
+        self.running = False
+        self.wait()
 
 class MapPropagationWorkerSignals(QObject):
     finished = pyqtSignal(str, str, str) # band, mode, json_data
@@ -3012,6 +3144,57 @@ class MapPropagationWorker(QRunnable):
             self.signals.finished.emit(self.band, self.mode, json.dumps(heatmap_data))
         except Exception as e:
             logging.warning(f"Error in MapPropagationWorker: {e}")
+
+class GaussianBlendWorkerSignals(QObject):
+    finished = pyqtSignal(str, str, str) # band, mode, json_data
+
+class GaussianBlendWorker(QRunnable):
+    def __init__(self, band: str, mode: str, cached_json: str, live_spots: List[Dict]):
+        super().__init__()
+        self.band = band
+        self.mode = mode
+        self.cached_json = cached_json
+        self.live_spots = live_spots
+        self.signals = GaussianBlendWorkerSignals()
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            import json, math
+            data = json.loads(self.cached_json)
+            
+            def haversine(lat1, lon1, lat2, lon2):
+                R = 6371.0 # Earth radius in km
+                dlat = math.radians(lat2 - lat1)
+                dlon = math.radians(lon2 - lon1)
+                a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+                return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+            if self.live_spots:
+                for point in data:
+                    lat, lon, base_prob = point[0], point[1], point[2]
+                    blended_prob = base_prob * 100.0
+                    
+                    max_spot_influence = 0.0
+                    for spot in self.live_spots:
+                        if abs(lat - spot['lat']) > 25.0: continue
+                        
+                        dist_km = haversine(lat, lon, spot['lat'], spot['lon'])
+                        if dist_km <= 3000.0:
+                            active_score = spot['score']
+                            w = math.exp(-(dist_km**2) / (2 * 300.0**2))
+                            influence = active_score * w
+                            if influence > max_spot_influence:
+                                max_spot_influence = influence
+                                
+                    blended_prob = max(blended_prob, max_spot_influence)
+                    point[2] = blended_prob / 100.0
+
+            self.signals.finished.emit(self.band, self.mode, json.dumps(data))
+        except Exception as e:
+            logging.warning(f"Error in GaussianBlendWorker: {e}")
+            self.signals.finished.emit(self.band, self.mode, self.cached_json)
+
 class MapBackend(QObject):
     filterChanged = pyqtSignal(str, str)
     graylineChanged = pyqtSignal(bool)
@@ -3115,6 +3298,10 @@ class MapWindow(QMainWindow):
         escaped_json = json.dumps(counts_data)
         self.web_view.page().runJavaScript(f"if (typeof window.updateBandCounts === 'function') window.updateBandCounts({escaped_json});")
 
+    def update_cache_status(self, cache_status):
+        escaped_json = json.dumps(cache_status)
+        self.web_view.page().runJavaScript(f"if (typeof window.updateCacheStatus === 'function') window.updateCacheStatus({escaped_json});")
+
     def set_last_update(self, time_str):
         self.web_view.page().runJavaScript(f"if (typeof window.setLastUpdate === 'function') window.setLastUpdate('{time_str}');")
 
@@ -3177,6 +3364,7 @@ class POTAPropApp(QMainWindow):
         self.home_grid = str(settings.value("home_grid", DEFAULT_HOME_GRID)).strip().upper() or DEFAULT_HOME_GRID
         self.current_grid = self.home_grid
         self.show_tooltips = settings.value("show_tooltips", True, type=bool)
+        self.low_memory_mode = settings.value("low_memory_mode", False, type=bool)
         self.p2p_mode = settings.value("p2p_mode", False, type=bool)
         self.p2p_my_park = str(settings.value("p2p_my_park", "")).strip().upper()
         self.p2p_my_park_name = ""
@@ -3440,6 +3628,17 @@ class POTAPropApp(QMainWindow):
         self.lbl_status_drap = make_status_lbl("NOAA SWPC D-RAP Absorption Model Sync Status")
         self.lbl_status_wx = make_status_lbl("NWS Regional Weather Sync Status")
         self.lbl_status_ltng = make_status_lbl("Blitzortung Regional Lightning Sync Status")
+        self.lbl_status_map = make_status_lbl("Maps: Gathering data...")
+        self.lbl_status_map.setText("Maps: Gathering data...")
+
+        self.heatmap_cache_service = HeatmapCacheService(self)
+        self.heatmap_cache_service.status_updated.connect(lambda txt, tt, col: (
+            self.lbl_status_map.setText(txt),
+            self.lbl_status_map.setToolTip(tt),
+            self.lbl_status_map.setStyleSheet(f"color: {col}; font-family: 'Consolas', monospace; font-weight: bold; font-size: 13px; background-color: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 3px 12px; margin-right: 4px;")
+        ))
+        self.heatmap_cache_service.cache_ready.connect(self.on_heatmap_cache_ready)
+        self.heatmap_cache_service.start()
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -3586,6 +3785,12 @@ class POTAPropApp(QMainWindow):
             self.map_window.update_band_counts(band_counts)
         if self.map_server:
             self.map_server.update_data("band_counts", band_counts)
+            
+        # Re-apply Gaussian spot blending to the currently viewed map immediately!
+        active_band = getattr(self, 'map_band', '20m')
+        active_mode = getattr(self, 'map_mode', 'SSB')
+        if active_band not in ("All", "All Bands", "Other"):
+            self.recalculate_map_heatmap(active_band, active_mode)
 
     def push_all_data_to_map(self):
         """Pushes full map state (spots, grayline, lightning, and recomputes 10-minute propagation heatmap)."""
@@ -3620,14 +3825,7 @@ class POTAPropApp(QMainWindow):
         if getattr(self, 'lightning_summary', None):
             self.update_map_lightning(self.lightning_summary)
             
-        # 10-Minute Propagation Heatmap calculation
-        active_band = getattr(self, 'map_band', '20m')
-        active_mode = getattr(self, 'map_mode', 'SSB')
-        if active_band in ("All", "All Bands", "Other"):
-            active_band = "20m"
-        if active_mode in ("All", "All Modes"):
-            active_mode = "SSB"
-        self.recalculate_map_heatmap(active_band, active_mode)
+        # Heatmap calculation is now seamlessly triggered by update_map_spots_only() above
 
     def on_map_timer_tick(self):
         if (self.map_window and self.map_window.isVisible()) or self.map_server:
@@ -3671,6 +3869,13 @@ class POTAPropApp(QMainWindow):
                         "score": float(c.propagation.probability_pct)
                     })
 
+        cached_json = self.heatmap_cache_service.heatmap_cache.get((band, mode))
+        if cached_json:
+            blend_worker = GaussianBlendWorker(band, mode, cached_json, live_spots)
+            blend_worker.signals.finished.connect(self.on_map_heatmap_calculated)
+            self._run_worker(blend_worker)
+            return
+
         worker = MapPropagationWorker(
             home_lat=home_lat,
             home_lon=home_lon,
@@ -3692,6 +3897,26 @@ class POTAPropApp(QMainWindow):
             self.map_server.update_data("last_update", "Updating... Standby...")
             
         self._run_worker(worker)
+
+    @pyqtSlot(str, str, str)
+    def on_heatmap_cache_ready(self, band: str, mode: str, json_data: str):
+        if not self.btn_map.isEnabled():
+            self.btn_map.setText("Live Map")
+            self.btn_map.setStyleSheet("background-color: #238636; color: white; font-weight: bold;")
+            self.btn_map.setEnabled(True)
+            
+        # Push the cache status to the map so it can color-code the dropdown
+        cache_status = {}
+        for b in self.heatmap_cache_service.bands_to_cache:
+            cache_status[b] = (b, "SSB") in self.heatmap_cache_service.heatmap_cache
+        if self.map_server:
+            self.map_server.update_data("cache_status", cache_status)
+        if self.map_window:
+            self.map_window.update_cache_status(cache_status)
+            
+        # If the map is currently viewing this band/mode, update it immediately!
+        if self.map_band == band and self.map_mode == mode:
+            self.on_map_heatmap_calculated(band, mode, json_data)
 
     @pyqtSlot(str, str, str)
     def on_map_heatmap_calculated(self, band: str, mode: str, heatmap_json: str):
@@ -3735,12 +3960,15 @@ class POTAPropApp(QMainWindow):
             new_p2p_mode = dlg.chk_start_p2p.isChecked()
             new_p2p_park = dlg.txt_p2p_park.text().strip().upper()
             new_map_mode = dlg.combo_map_mode.currentData() or MAP_RENDER_AUTO
+            new_low_mem = dlg.chk_low_mem.isChecked()
             
             settings = QSettings("POTA", "HunterComparator")
             settings.setValue("p2p_mode", new_p2p_mode)
             settings.setValue("p2p_my_park", new_p2p_park)
             settings.setValue("map_render_mode", new_map_mode)
+            settings.setValue("low_memory_mode", new_low_mem)
             self.map_render_mode = new_map_mode
+            self.low_memory_mode = new_low_mem
             
             if new_call != self.my_call:
                 self.my_call = new_call
@@ -4150,12 +4378,9 @@ class POTAPropApp(QMainWindow):
                 "CW",
                 "SSB",
                 "FT8",
-                "FT4",
-                "JS8",
-                "PSK",
+                "DATA",
                 "FM",
                 "AM",
-                "Other Digital",
             ]
         )
         mode_idx = self.combo_mode.findText(self.filter_mode)
@@ -4225,8 +4450,9 @@ class POTAPropApp(QMainWindow):
         layout.addWidget(btn_reset)
 
         # Live Map button
-        self.btn_map = QPushButton("Live Map")
-        self.btn_map.setStyleSheet("background-color: #238636; color: white; font-weight: bold;")
+        self.btn_map = QPushButton("Getting Data...")
+        self.btn_map.setStyleSheet("background-color: gray; color: white; font-weight: bold;")
+        self.btn_map.setEnabled(False)
         self.btn_map.setToolTip("Open interactive Live Propagation, Space Weather & Doppler Radar Map (F4)")
         self.btn_map.clicked.connect(self.show_map_window)
         layout.addWidget(self.btn_map)
@@ -4557,8 +4783,7 @@ class POTAPropApp(QMainWindow):
                     if hasattr(self, "map_server") and self.map_server:
                         self.map_server.update_data("home_lat", h_lat)
                         self.map_server.update_data("home_lon", h_lon)
-                    if hasattr(self, "map_window") and self.map_window:
-                        self.map_window.set_home_qth(h_lat, h_lon)
+
                 if hasattr(self, "card_unique_parks"):
                     self.recompute_comparisons()
                 if hasattr(self, "card_weather"):
@@ -4599,8 +4824,7 @@ class POTAPropApp(QMainWindow):
                     if hasattr(self, "map_server") and self.map_server:
                         self.map_server.update_data("home_lat", h_lat)
                         self.map_server.update_data("home_lon", h_lon)
-                    if hasattr(self, "map_window") and self.map_window:
-                        self.map_window.set_home_qth(h_lat, h_lon)
+
                 if hasattr(self, "card_unique_parks"):
                     self.recompute_comparisons()
                 if hasattr(self, "card_weather"):
@@ -5284,12 +5508,12 @@ class POTAPropApp(QMainWindow):
 
 
         # We skip pushing to the map during the fast pass because the scores are dummy cache/pending values.
-        # We will push to the map once the background PhysicsWorker finishes and returns the true RF scores.
+        # We will push to the map once the background PhysicsWorker finishes and returns the true QSO scores.
         self.apply_filters()
 
     @pyqtSlot(list, object)
     def on_physics_complete(self, compared_spots, regional_matrix):
-        """Called when the background physics thread finishes computing RF scores."""
+        """Called when the background physics thread finishes computing QSO scores."""
         # 1. Update the cache
         for cs in compared_spots:
             cache_key = f"{cs.spot.activator}_{cs.spot.reference}_{cs.spot.frequency_khz}"
@@ -5310,7 +5534,7 @@ class POTAPropApp(QMainWindow):
             else:
                 self.update_map_spots_only()
             
-        self.status_bar.showMessage(f"Loaded {len(compared_spots)} active spots with propagated RF scores.", 5000)
+        self.status_bar.showMessage(f"Loaded {len(compared_spots)} active spots with propagated QSO scores.", 5000)
 
     def _update_table_scores_in_place(self):
         """Updates just the Score and Distance cells in the table to avoid scrolling jumps."""
@@ -5447,26 +5671,17 @@ class POTAPropApp(QMainWindow):
                 elif mode_filter == "FT8":
                     if spot_m != "FT8":
                         continue
-                elif mode_filter == "FT4":
-                    if spot_m != "FT4":
-                        continue
-                elif mode_filter == "JS8":
-                    if spot_m not in ("JS8", "JS8CALL"):
-                        continue
-                elif mode_filter == "PSK":
-                    if not (spot_m == "PSK" or spot_m.startswith("PSK")):
-                        continue
                 elif mode_filter == "FM":
                     if spot_m != "FM":
                         continue
                 elif mode_filter == "AM":
                     if spot_m != "AM":
                         continue
-                elif mode_filter in ("Other Digital", "Digital"):
+                elif mode_filter == "DATA":
                     standard_non_other = {
-                        "CW", "SSB", "USB", "LSB", "PHONE", "FT8", "FT4", "JS8", "JS8CALL", "FM", "AM"
+                        "CW", "SSB", "USB", "LSB", "PHONE", "FT8", "FM", "AM"
                     }
-                    if spot_m in standard_non_other or spot_m.startswith("PSK"):
+                    if spot_m in standard_non_other:
                         continue
                 elif spot_m != mode_filter.upper():
                     continue
@@ -5521,7 +5736,7 @@ class POTAPropApp(QMainWindow):
         exp_info = f" | Expire in ~{cs.expire_mins_remaining}m" if cs.expire_mins_remaining is not None else ""
         lines.append(f"<div style='margin-bottom: 8px;'><b>Spot Freshness:</b> {cs.time_ago_str} ({cs.decay_status}){exp_info}</div>")
 
-        # 3. RF Score & Propagation Path
+        # 3. QSO Score & Propagation Path
         prob = cs.dx_percentage
         prob_color = "#3fb950" if prob >= 75 else ("#d29922" if prob >= 50 else "#f85149")
         prob_badge = (
@@ -5543,7 +5758,7 @@ class POTAPropApp(QMainWindow):
             if cs.propagation
             else "N/A"
         )
-        lines.append(f"<div style='margin-bottom: 2px;'><b>RF Score:</b> <span style='color: {prob_color}; font-weight: bold;'>{prob} ({prob_badge})</span> | <b>Distance:</b> {dist_info}</div>")
+        lines.append(f"<div style='margin-bottom: 2px;'><b>QSO Score:</b> <span style='color: {prob_color}; font-weight: bold;'>{prob} ({prob_badge})</span> | <b>Distance:</b> {dist_info}</div>")
         if cs.spot_evidence and cs.spot_evidence.is_qrp:
             qrp_label = cs.spot_evidence.qrp_desc or "QRP (Low Power)"
             lines.append(f"<div style='margin-bottom: 2px;'><b>Activator Power:</b> <span style='color: #e3b341; font-weight: bold;'>⚡ {qrp_label}</span></div>")
@@ -6388,6 +6603,7 @@ class POTAPropApp(QMainWindow):
         settings.setValue("home_grid", self.home_grid)
 
         settings.setValue("show_tooltips", self.show_tooltips)
+        settings.setValue("low_memory_mode", self.low_memory_mode)
         settings.setValue("p2p_mode", self.p2p_mode)
         settings.setValue("p2p_my_park", self.p2p_my_park)
         settings.setValue("tx_power", self.tx_power)

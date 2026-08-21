@@ -1013,7 +1013,9 @@ class CallsignResolver:
                 if not state_val:
                     state_val = "DX"
                     
-            cached = {"state": state_val, "grid": None, "latitude": None, "longitude": None, "name": None}
+            cached = {"state": state_val, "grid": None, "latitude": None, "longitude": None, "name": None, "invalid": True}
+            with self._lock:
+                self.memory_cache[call] = cached
 
         state = cached.get("state")
         grid = cached.get("grid")
@@ -1165,6 +1167,8 @@ class CallsignResolver:
         except Exception as e:
             logger.debug(f"HamDB callsign lookup error for {call}: {e}")
 
+        cached = {"state": None, "grid": None, "latitude": None, "longitude": None, "name": None, "invalid": True}
+        self.memory_cache[call] = cached
         return None
 
 
@@ -2761,17 +2765,7 @@ def calculate_qso_probability(
                 loc_type = target_state if target_state else (target_grid[:2] if target_grid else "region")
                 regional_summary = f"{band} path to {loc_type} confirmed open by local spotters"
 
-            # Apply smooth continuous distance-decay gradient if spatial coordinates were matched
-            if base_boost > 0 and t_lat is not None and t_lon is not None and getattr(regional_matrix, "centers", None):
-                radius_km = get_band_aperture_radius_km(band)
-                if best_dist <= radius_km:
-                    decay = math.cos(math.pi * best_dist / (2.0 * radius_km)) ** 2
-                    regional_boost = max(0, int(round(base_boost * decay)))
-                else:
-                    regional_boost = 0
-            else:
-                regional_boost = base_boost
-                    
+            regional_boost = base_boost
     # Inject regional boost into evidence
     if spot_evidence and regional_boost > 0:
         spot_evidence.regional_boost = regional_boost
@@ -3088,18 +3082,12 @@ def calculate_qso_probability(
     if clean_mode in ("FT8", "JS8"):
         bw_hz = 50.0
         snr_req_db = -21.0
-    elif clean_mode == "FT4":
-        bw_hz = 90.0
-        snr_req_db = -17.0
     elif clean_mode == "CW":
         bw_hz = 500.0
         snr_req_db = -10.0
-    elif clean_mode == "PSK" or clean_mode.startswith("PSK"):
-        bw_hz = 50.0
-        snr_req_db = -8.0
-    elif clean_mode in ("OTHER DIGITAL", "DIGITAL", "DATA", "RTTY", "VARAC", "VARA", "OLIVIA", "CONTESTIA", "THOR", "MFSK", "WSPR", "JT65", "Q65", "MSK144", "DMR", "C4FM", "DSTAR", "FREEDV", "SSTV"):
-        bw_hz = 500.0
-        snr_req_db = -10.0
+    elif clean_mode in ("FT4", "PSK", "OTHER DIGITAL", "DIGITAL", "DATA", "RTTY", "VARAC", "VARA", "OLIVIA", "CONTESTIA", "THOR", "MFSK", "WSPR", "JT65", "Q65", "MSK144", "DMR", "C4FM", "DSTAR", "FREEDV", "SSTV") or clean_mode.startswith("PSK"):
+        bw_hz = 300.0
+        snr_req_db = -14.0
     elif clean_mode in ("SSB", "PHONE"):
         bw_hz = 2400.0
         snr_req_db = 4.0
@@ -3119,7 +3107,6 @@ def calculate_qso_probability(
     # F. Transmitter Power & Received Signal Power (dBW)
     tx_power_dbw = 10.0 * math.log10(tx_watts)  # dBW (100W = -10 dBW)
     pota_activator_offset_db = -2.0  # Activator portable field deployment / compromised ground offset
-    flare_offset_db = float(solar_weather.flare_penalty) * 0.4 if daylight_path > 0.05 else 0.0
 
     # Activator QRP Power Adjustment (baseline in POTA is 100W activator)
     activator_qrp_offset_db = 0.0
@@ -3137,7 +3124,6 @@ def calculate_qso_probability(
         - total_path_loss_db
         + pota_activator_offset_db
         + activator_qrp_offset_db
-        + flare_offset_db
     )
 
     # Signal-to-Noise Ratio (dB)
@@ -3414,3 +3400,46 @@ def compute_band_noise_matrix(
         )
 
     return results
+
+def calculate_heatmap_matrix_mp(
+    home_lat: float,
+    home_lon: float,
+    band: str,
+    mode: str,
+    freq: float,
+    solar_weather: SolarWeather,
+    tx_power: float,
+    antenna_type: str,
+    lightning: Optional[Any],
+    regional_matrix: Optional[Any]
+) -> str:
+    """Standalone, picklable function for multiprocessing to calculate 1x2 degree heatmap grid."""
+    heatmap_data = []
+    
+    for lat in range(-90, 90, 1):
+        for lon in range(-180, 180, 2):
+            center_lat = lat + 0.5
+            center_lon = lon + 1.0
+            
+            target_grid = latlon_to_maidenhead(center_lat, center_lon, precision=4)
+            
+            res = calculate_qso_probability(
+                home_lat=home_lat,
+                home_lon=home_lon,
+                target_lat=center_lat,
+                target_lon=center_lon,
+                target_grid=target_grid,
+                freq_khz=freq,
+                band=band,
+                mode=mode,
+                solar_weather=solar_weather,
+                tx_power_watts=tx_power,
+                antenna_type=antenna_type,
+                lightning_summary=lightning,
+                regional_matrix=regional_matrix
+            )
+            
+            if res and res.probability_pct >= 0:
+                heatmap_data.append([lat, lon, res.probability_pct / 100.0])
+                
+    return json.dumps(heatmap_data)

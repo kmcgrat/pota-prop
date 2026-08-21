@@ -203,12 +203,7 @@
                             '<option value="CW">CW</option>' +
                             '<option value="SSB" selected>SSB</option>' +
                             '<option value="FT8">FT8</option>' +
-                            '<option value="FT4">FT4</option>' +
-                            '<option value="JS8">JS8</option>' +
-                            '<option value="PSK">PSK</option>' +
-                            '<option value="FM">FM</option>' +
-                            '<option value="AM">AM</option>' +
-                            '<option value="Other Digital">Other Digital</option>' +
+                            '<option value="DATA">DATA (Other)</option>' +
                             '</select>' +
                             '<div style="margin-top: 6px;"><b>Heatmap Opacity</b></div>' +
                             '<input type="range" id="opacity-slider" min="0" max="1" step="0.1" value="0.8" style="width: 100%;" oninput="window.changeOpacity(this.value)">' +
@@ -421,6 +416,28 @@
                     opt.text = "All Spots (" + c + " Parks)";
                 } else {
                     opt.text = band + " (" + c + ")";
+                }
+            }
+        } catch(e) {}
+    };
+
+    window.updateCacheStatus = function(status_json) {
+        try {
+            var statuses = (typeof status_json === 'string') ? JSON.parse(status_json) : status_json;
+            var select = document.getElementById('band-select');
+            if (!select) return;
+            for (var i = 0; i < select.options.length; i++) {
+                var opt = select.options[i];
+                var band = opt.value;
+                if (band !== "All" && band !== "Other") {
+                    var isReady = statuses[band];
+                    if (isReady) {
+                        opt.style.color = '#7ee787';
+                        opt.style.backgroundColor = '#16231a';
+                    } else {
+                        opt.style.color = '#f85149';
+                        opt.style.backgroundColor = '#2c1215';
+                    }
                 }
             }
         } catch(e) {}
@@ -655,19 +672,9 @@
                         modeMatches = true;
                     } else if (cm === "FT8" && m === "FT8") {
                         modeMatches = true;
-                    } else if (cm === "FT4" && m === "FT4") {
-                        modeMatches = true;
-                    } else if (cm === "JS8" && (m === "JS8" || m === "JS8CALL")) {
-                        modeMatches = true;
-                    } else if (cm === "PSK" && (m === "PSK" || m.indexOf("PSK") === 0)) {
-                        modeMatches = true;
-                    } else if (cm === "FM" && m === "FM") {
-                        modeMatches = true;
-                    } else if (cm === "AM" && m === "AM") {
-                        modeMatches = true;
-                    } else if (cm === "OTHER DIGITAL" || cm === "DIGITAL" || cm === "DATA") {
-                        var standardNonOther = ["CW", "SSB", "USB", "LSB", "PHONE", "FT8", "FT4", "JS8", "JS8CALL", "FM", "AM"];
-                        if (standardNonOther.indexOf(m) === -1 && m.indexOf("PSK") !== 0) {
+                    } else if (cm === "DATA") {
+                        var standardNonOther = ["CW", "SSB", "USB", "LSB", "PHONE", "FT8", "FM", "AM"];
+                        if (standardNonOther.indexOf(m) === -1) {
                             modeMatches = true;
                         }
                     } else if (m === cm) {
