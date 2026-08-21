@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 from map_server import MapServerManager
 from drap_engine import get_drap_status, get_drap_last_sync_time
 
-APP_VERSION = "26.8.17-9"
+APP_VERSION = "26.8.17-10"
 
 MAP_RENDER_AUTO = "auto"
 MAP_RENDER_QT = "qt"
@@ -1652,6 +1652,10 @@ class SettingsDialog(QDialog):
         self.chk_low_mem.setChecked(getattr(parent, 'low_memory_mode', False) if parent else False)
         form_layout.addRow("Performance:", self.chk_low_mem)
         
+        self.chk_conserve_battery = QCheckBox("Conserve Battery (Maps generate on-demand only)")
+        self.chk_conserve_battery.setChecked(getattr(parent, 'conserve_battery_mode', False) if parent else False)
+        form_layout.addRow("", self.chk_conserve_battery)
+        
         self.txt_rbn.textChanged.connect(self._update_distances)
         self.txt_grid.textChanged.connect(self._update_distances)
         self.txt_call.editingFinished.connect(self.on_callsign_editing_finished)
@@ -2998,8 +3002,39 @@ class HeatmapCacheService(QThread):
             
         from propagation_engine import calculate_heatmap_matrix_mp
         
+        first_pass = True
         while self.running:
-            for band in self.bands_to_cache:
+            conserve_battery = getattr(self.parent_app, 'conserve_battery_mode', False)
+            bands_to_run = self.bands_to_cache
+            
+            if conserve_battery and not first_pass:
+                active_map_band = getattr(self.parent_app, 'map_band', '20m')
+                is_map_open = False
+                render_mode = getattr(self.parent_app, 'map_render_mode', 0)
+                is_browser = (render_mode == 2) or (render_mode == 0 and getattr(self.parent_app, 'is_chromebook', False))
+                
+                if is_browser:
+                    is_map_open = True
+                else:
+                    is_map_open = self.parent_app.map_window is not None and self.parent_app.map_window.isVisible()
+                
+                if not is_map_open:
+                    bands_to_run = []
+                else:
+                    bands_to_run = [active_map_band] if active_map_band in self.bands_to_cache else []
+
+            if not bands_to_run:
+                self.current_updating_band = None
+                self._emit_status("Maps: Paused (Battery Saver)")
+                for _ in range(10):
+                    if not self.running: return
+                    if getattr(self.parent_app, 'map_band_changed_flag', False):
+                        self.parent_app.map_band_changed_flag = False
+                        break
+                    time.sleep(1.0)
+                continue
+
+            for band in bands_to_run:
                 start_time = time.time()
                 self.current_updating_band = band
                 self._emit_status(f"Maps: Updating {band}...")
@@ -3067,10 +3102,18 @@ class HeatmapCacheService(QThread):
                 
                 # Space out bands by 1 minute (or 15 mins in low memory mode)
                 sleep_time = 900 if low_mem else 60
+                if conserve_battery and not first_pass:
+                    sleep_time = 600
+                
                 for _ in range(sleep_time):
                     if not self.running:
                         break
+                    if conserve_battery and getattr(self.parent_app, 'map_band_changed_flag', False):
+                        self.parent_app.map_band_changed_flag = False
+                        break
                     time.sleep(1.0)
+                    
+            first_pass = False
                     
     def stop(self):
         self.running = False
@@ -3368,6 +3411,10 @@ class POTAPropApp(QMainWindow):
         self.show_tooltips = settings.value("show_tooltips", True, type=bool)
         val = settings.value("low_memory_mode", False)
         self.low_memory_mode = (str(val).lower() == 'true') if isinstance(val, str) else bool(val)
+
+        val_cb = settings.value("conserve_battery_mode", False)
+        self.conserve_battery_mode = (str(val_cb).lower() == 'true') if isinstance(val_cb, str) else bool(val_cb)
+        self.map_band_changed_flag = False
         self.p2p_mode = settings.value("p2p_mode", False, type=bool)
         self.p2p_my_park = str(settings.value("p2p_my_park", "")).strip().upper()
         self.p2p_my_park_name = ""
@@ -3676,6 +3723,7 @@ class POTAPropApp(QMainWindow):
     def on_web_filter_changed(self, band, mode):
         self.map_band = band
         self.map_mode = mode
+        self.map_band_changed_flag = True
         if self.map_server:
             self.map_server.update_data("band", band)
             self.map_server.update_data("mode", mode)
@@ -3693,6 +3741,8 @@ class POTAPropApp(QMainWindow):
         if active_mode in ("All", "All Modes"):
             active_mode = "SSB"
             self.map_mode = "SSB"
+            
+        self.map_band_changed_flag = True
             
         if self.map_server:
             self.map_server.update_data("band", active_band)
@@ -3964,14 +4014,17 @@ class POTAPropApp(QMainWindow):
             new_p2p_park = dlg.txt_p2p_park.text().strip().upper()
             new_map_mode = dlg.combo_map_mode.currentData() or MAP_RENDER_AUTO
             new_low_mem = dlg.chk_low_mem.isChecked()
+            new_conserve = dlg.chk_conserve_battery.isChecked()
             
             settings = QSettings("POTA", "HunterComparator")
             settings.setValue("p2p_mode", new_p2p_mode)
             settings.setValue("p2p_my_park", new_p2p_park)
             settings.setValue("map_render_mode", new_map_mode)
             settings.setValue("low_memory_mode", new_low_mem)
+            settings.setValue("conserve_battery_mode", new_conserve)
             self.map_render_mode = new_map_mode
             self.low_memory_mode = new_low_mem
+            self.conserve_battery_mode = new_conserve
             
             if new_call != self.my_call:
                 self.my_call = new_call
@@ -6607,6 +6660,7 @@ class POTAPropApp(QMainWindow):
 
         settings.setValue("show_tooltips", self.show_tooltips)
         settings.setValue("low_memory_mode", self.low_memory_mode)
+        settings.setValue("conserve_battery_mode", getattr(self, 'conserve_battery_mode', False))
         settings.setValue("p2p_mode", self.p2p_mode)
         settings.setValue("p2p_my_park", self.p2p_my_park)
         settings.setValue("tx_power", self.tx_power)

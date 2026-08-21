@@ -532,17 +532,17 @@ class SpotEvidence:
 # Dynamic Frequency-Dependent Physical Aperture Footprint Radii
 # -------------------------------------------------------------
 BAND_APERTURE_RADIUS_KM: Dict[str, float] = {
-    "160M": 200.0,
-    "80M": 200.0,
-    "60M": 300.0,
-    "40M": 300.0,
-    "30M": 450.0,
-    "20M": 650.0,
-    "17M": 800.0,
-    "15M": 800.0,
-    "12M": 950.0,
-    "10M": 950.0,
-    "6M": 500.0,
+    "160M": 320.0,
+    "80M": 320.0,
+    "60M": 320.0,
+    "40M": 320.0,
+    "30M": 240.0,
+    "20M": 240.0,
+    "17M": 240.0,
+    "15M": 240.0,
+    "12M": 240.0,
+    "10M": 240.0,
+    "6M": 200.0,
     "2M": 60.0,
     "70CM": 40.0,
 }
@@ -1900,7 +1900,7 @@ def parse_spot_evidence(
     ) if neighbor_tokens else re.compile(r"a^")
 
     sig_pattern = re.compile(
-        r"\b(5[5-9]9?|4[4-9]9?|20\s*OVER|LOUD|BOOMING|STRONG|SOLID|GREAT\s+SIG|GOOD\s+SIG|\+?\d+\s*dB)\b",
+        r"\b(?:RST\s*)?([1-5][1-9]9?|20\s*OVER|LOUD|BOOMING|STRONG|SOLID|GREAT\s+SIG|GOOD\s+SIG|MARGINAL|WEAK|\+?\d+\s*dB)\b",
         re.IGNORECASE,
     )
     rbn_pattern = re.compile(r"RBN\s*([+-]?\d+)\s*dB", re.IGNORECASE)
@@ -2122,15 +2122,30 @@ def parse_spot_evidence(
             reasons.append(f"{land_label} spotter {closest_call}")
 
     if has_state_mention:
-        if has_positive_sig:
+        best_rst_val = 0
+        for s in signal_reports:
+            if s.isdigit() and len(s) >= 2:
+                try:
+                    best_rst_val = max(best_rst_val, int(s[:2]))
+                except: pass
+            elif s in ("LOUD", "BOOMING", "STRONG", "SOLID", "20 OVER"):
+                best_rst_val = max(best_rst_val, 59)
+                
+        if best_rst_val >= 57 or "+DB" in " ".join(signal_reports):
             boost += 25
-            reasons.append(f"Direct {op_state_code} 59 report")
+            reasons.append(f"Direct {op_state_code} strong report ({best_rst_val or '59+'})")
+        elif best_rst_val >= 44:
+            boost += 10
+            reasons.append(f"Direct {op_state_code} moderate report ({best_rst_val})")
+        elif best_rst_val >= 33 or has_positive_sig:
+            boost += 5
+            reasons.append(f"Direct {op_state_code} weak/marginal report ({best_rst_val})")
         else:
             boost += 15
             reasons.append(f"{op_state_code} mention in spot")
     elif has_neighbor_mention and has_positive_sig:
-        boost += 12
-        reasons.append("Neighbor state 59 report")
+        boost += 10
+        reasons.append("Neighbor state report")
 
     if max_rbn_snr is not None:
         if max_rbn_snr >= 10.0:
@@ -2737,21 +2752,27 @@ def calculate_qso_probability(
                 if best_snrs:
                     max_snr = max(best_snrs)
                     if target_is_voice:
-                        if max_snr >= 0:
+                        if max_snr >= 6:
                             base_boost = 15
                             regional_summary = f"{band} path confirmed open by exceptionally strong FT8 ({max_snr}dB SNR)"
-                        elif max_snr >= -8:
-                            base_boost = 5
-                            regional_summary = f"{band} path confirmed open by moderate FT8 ({max_snr}dB SNR - marginal for Voice)"
+                        elif max_snr >= 0:
+                            base_boost = 8
+                            regional_summary = f"{band} path confirmed open by moderate FT8 ({max_snr}dB SNR)"
+                        elif max_snr >= -5:
+                            base_boost = 3
+                            regional_summary = f"{band} path confirmed open by weak FT8 ({max_snr}dB SNR - marginal for Voice)"
                         else:
                             base_boost = 0
                             regional_summary = ""
                     elif target_is_cw:
-                        if max_snr >= -12:
+                        if max_snr >= -5:
                             base_boost = 15
                             regional_summary = f"{band} path confirmed open by strong FT8 ({max_snr}dB SNR - good for CW)"
+                        elif max_snr >= -12:
+                            base_boost = 8
+                            regional_summary = f"{band} path confirmed open by moderate FT8 ({max_snr}dB SNR)"
                         elif max_snr >= -18:
-                            base_boost = 5
+                            base_boost = 3
                             regional_summary = f"{band} path confirmed open by weak FT8 ({max_snr}dB SNR - marginal for CW)"
                         else:
                             base_boost = 0
@@ -2761,8 +2782,19 @@ def calculate_qso_probability(
                     base_boost = 0
                     regional_summary = ""
             else:
-                base_boost = 15
-                loc_type = target_state if target_state else (target_grid[:2] if target_grid else "region")
+                if best_snrs and opened_by_weak:
+                    max_snr = max(best_snrs)
+                    if max_snr >= -10:
+                        base_boost = 15
+                    elif max_snr >= -20:
+                        base_boost = 8
+                    else:
+                        base_boost = 3
+                    loc_type = target_state if target_state else (target_grid[:2] if target_grid else "region")
+                    regional_summary = f"{band} path confirmed open ({max_snr}dB SNR)"
+                else:
+                    base_boost = 15
+                    loc_type = target_state if target_state else (target_grid[:2] if target_grid else "region")
                 regional_summary = f"{band} path to {loc_type} confirmed open by local spotters"
 
             regional_boost = base_boost
@@ -3148,8 +3180,8 @@ def calculate_qso_probability(
     if is_penetrated:
         # Operating frequency exceeds Oblique MUF -> ray penetrates layer into space!
         # Skip-zone dead-zone cutoff with continuous empirical bypass scaling
-        skip_scale = 0.10 + 0.90 * min(1.0, max(0.0, regional_boost / 15.0))
-        max_floor = 12.0 + 88.0 * min(1.0, max(0.0, regional_boost / 15.0))
+        skip_scale = 0.10 + 0.50 * min(1.0, max(0.0, regional_boost / 15.0))
+        max_floor = 12.0 + 58.0 * min(1.0, max(0.0, regional_boost / 15.0))
         raw_rel_pct = max(0.0, min(max_floor, raw_rel_pct * skip_scale))
     elif is_screened:
         raw_rel_pct = max(5.0, raw_rel_pct - 25.0)
@@ -3172,7 +3204,16 @@ def calculate_qso_probability(
         raw_rel_pct = max(5.0, raw_rel_pct - storm_sub)
 
     # Apply Regional Matrix Boost to the raw score EVEN IF there is no Spot Evidence (e.g. for the Heatmap!)
+    # HARD GATING: Signal must mathematically clear the required noise floor for the mode!
+    # If the mathematical signal is buried in noise (due to path loss, heavy QRN, or QRP power),
+    # empirical regional boosts scale down to zero.
     if regional_boost > 0:
+        if snr_db < snr_req_db:
+            # Scale down the boost aggressively if signal is below required noise floor
+            deficit = snr_req_db - snr_db
+            noise_scaler = max(0.0, 1.0 - (deficit / 6.0)) # Linear fade to 0 over 6dB deficit
+            regional_boost = regional_boost * noise_scaler
+            
         raw_rel_pct = max(1.0, min(99.0, raw_rel_pct + regional_boost))
 
     # I. Spot Evidence Fusion

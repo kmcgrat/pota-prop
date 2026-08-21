@@ -1,0 +1,38 @@
+# POTA Prop: Propagation Engine Golden Rules
+
+This document serves as the architectural truth for the POTA Prop Propagation Engine. It outlines how physical ray-tracing models interact with real-time empirical spotting networks (POTA, PSKReporter, RBN) to render accurate propagation heatmaps.
+
+## 1. Core Physics & The Noise Floor Gate
+The propagation engine is fundamentally built upon ITU-R P.372 atmospheric noise modeling, multi-hop ray tracing, D-layer absorption, and E-layer screening. 
+*   **The Golden Rule of Noise**: Before any empirical spot boost or heatmap enhancement is applied, the calculated received signal must mathematically clear the local noise floor.
+*   If a signal is buried under heavy QRN (e.g., thunderstorms), intense path loss, or QRP power constraints such that `Calculated SNR < Required Mode SNR`, the empirical spot boost is linearly scaled down to zero. 
+*   *Anomalous spot intelligence cannot magically make an unintelligible signal readable over a roaring local noise floor.*
+
+## 2. Empirical Spatial Footprints (Aperture Radii)
+When a real-world spot occurs, its "boost" radius is strictly constrained to represent localized physical anomalies (like Sporadic-E clouds or tropospheric scatter) rather than massive continent-wide blooms.
+*   **Low Bands (160m - 40m)**: Aperture radius is capped at ~200 miles (320 km).
+*   **High Bands (30m - 10m)**: Aperture radius is capped at ~150 miles (240 km).
+*   **VHF/UHF**: Aperture radius is capped at ~37 miles (60 km).
+Any grid square outside this radius relies purely on the mathematical propagation physics.
+
+## 3. Real-World Spot Verification & RST Decoding
+Not all spots are created equal. The engine dynamically parses spotter comments to extract signal reports and scales the empirical boost accordingly:
+*   **Strong Reports (57-59+, "LOUD", "BOOMING")**: Grants the maximum probability boost (+25).
+*   **Moderate Reports (44-56)**: Grants a moderate boost (+10).
+*   **Marginal Reports (33-43, "WEAK", "QSB")**: Grants a minimal survival boost (+5).
+*   This prevents a barely audible contact from turning the entire region bright green on the heatmap.
+
+## 4. Cross-Mode Supplementation (RBN & PSKReporter to SSB)
+The engine securely leverages ubiquitous weak-signal telemetry (FT8 via PSKReporter, CW via RBN) to supplement the Voice (SSB) heatmap, but strictly scales for mode sensitivity.
+Because FT8 can decode at -21 dB SNR while SSB requires at least +4 dB SNR to be readable:
+*   **FT8 SNR >= +6 dB**: Granted a full boost on the SSB heatmap (Booming weak-signal).
+*   **FT8 SNR >= 0 dB**: Granted a moderate boost on the SSB heatmap.
+*   **FT8 SNR >= -5 dB**: Granted a marginal boost on the SSB heatmap.
+*   **FT8 SNR < -5 dB**: **Zero boost** applied to the SSB heatmap. The signal is mathematically too weak to carry Voice.
+Similar stepped logic applies when mapping FT8/Digital telemetry onto CW maps.
+
+## 5. Skip-Zone Integrity
+When the physical model predicts a path is inside the "skip-zone" (operating frequency exceeds Oblique MUF and penetrates into space), empirical spots must not entirely erase that physics penalty.
+*   If a local spot confirms propagation inside a calculated skip-zone, it proves the existence of anomalous propagation (e.g., Ground Backscatter, Sporadic-E, Airplane Scatter).
+*   **The Skip-Zone Cap**: The engine limits the empirical recovery of a skip-zone to a maximum of 60% bypass, capping the total probability at 70%.
+*   This ensures that anomalous skip-zone contacts render as **Yellow / Orange** (Marginal/Unstable) on the heatmap, correctly differentiating them from solid **Green** (Highly Reliable) F2 skywave paths.

@@ -269,7 +269,7 @@ class WeatherEngine:
         try:
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": "POTA-Hunter/26.8.17-6 (Amateur Radio Operator Tool)"}
+                headers={"User-Agent": "POTA-Hunter/26.8.17-10 (Amateur Radio Operator Tool)"}
             )
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 if response.status == 200:

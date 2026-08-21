@@ -189,6 +189,7 @@ class LightningStrike:
     longitude: float
     distance_miles: float
     bearing_deg: float
+    raw_delay: float = 0.0
 
 
 @dataclass
@@ -935,7 +936,7 @@ class BlitzortungStreamThread(threading.Thread):
             f"Sec-WebSocket-Key: {key}\r\n"
             f"Sec-WebSocket-Version: 13\r\n"
             f"Origin: https://map.blitzortung.org\r\n"
-            f"User-Agent: POTA-Hunter/26.8.17-6\r\n\r\n"
+            f"User-Agent: POTA-Hunter/26.8.17-10\r\n\r\n"
         )
         ssock.sendall(req.encode("utf-8"))
         handshake_resp = ssock.recv(2048)
@@ -1159,7 +1160,7 @@ class LightningEngine:
             req = urllib.request.Request(
                 url,
                 headers={
-                    "User-Agent": "POTA-Hunter-Propagation-Engine/26.8.17-6",
+                    "User-Agent": "POTA-Hunter-Propagation-Engine/26.8.17-10",
                     "Accept": "application/geo+json",
                 },
             )
